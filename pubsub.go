@@ -59,7 +59,7 @@ func (s *Sidecar) handleBroadcast(payload string) {
 	}
 	switch m.Action {
 	case "refresh":
-		resp, err := s.HTTP.Post(
+		resp, err := s.doPost(
 			s.Config.AppURL+"/internal/inMem/refresh",
 			"application/json",
 			strings.NewReader(string(m.Payload)),
@@ -88,7 +88,7 @@ func (s *Sidecar) handlePodRequest(ctx context.Context, payload string) {
 	}
 	switch req.Action {
 	case "get":
-		resp, err := s.HTTP.Post(
+		resp, err := s.doPost(
 			s.Config.AppURL+"/internal/inMem/get",
 			"application/json",
 			strings.NewReader(string(req.Payload)),

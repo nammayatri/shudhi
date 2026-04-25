@@ -1,0 +1,537 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Shudhi — Cache Dashboard</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    :root {
+      --bg: #0f1117;
+      --surface: #1a1d27;
+      --border: #2a2d3a;
+      --text: #e1e4ed;
+      --muted: #8b8fa3;
+      --accent: #6c7ee1;
+      --accent-hover: #8190e8;
+      --green: #4ade80;
+      --red: #f87171;
+      --yellow: #facc15;
+    }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+    }
+    header {
+      border-bottom: 1px solid var(--border);
+      padding: 16px 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    header h1 { font-size: 18px; font-weight: 600; }
+    header h1 span { color: var(--muted); font-weight: 400; margin-left: 8px; font-size: 13px; }
+    .config-bar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .config-bar label { font-size: 12px; color: var(--muted); }
+    .config-bar input {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 6px 10px;
+      border-radius: 6px;
+      font-size: 13px;
+      width: 280px;
+    }
+    .config-bar button {
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      padding: 6px 14px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 13px;
+    }
+    .config-bar button:hover { background: var(--accent-hover); }
+
+    .layout {
+      display: grid;
+      grid-template-columns: 220px 280px 1fr;
+      height: calc(100vh - 57px);
+    }
+    .panel {
+      border-right: 1px solid var(--border);
+      overflow-y: auto;
+    }
+    .panel:last-child { border-right: none; }
+    .panel-header {
+      padding: 12px 16px;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--muted);
+      border-bottom: 1px solid var(--border);
+      position: sticky;
+      top: 0;
+      background: var(--bg);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .panel-header .count {
+      background: var(--surface);
+      padding: 2px 7px;
+      border-radius: 10px;
+      font-size: 11px;
+    }
+    .list-item {
+      padding: 10px 16px;
+      cursor: pointer;
+      font-size: 13px;
+      border-bottom: 1px solid var(--border);
+      transition: background 0.1s;
+    }
+    .list-item:hover { background: var(--surface); }
+    .list-item.active { background: var(--surface); border-left: 2px solid var(--accent); }
+    .list-item .sub { font-size: 11px; color: var(--muted); margin-top: 2px; }
+
+    .detail {
+      padding: 20px 24px;
+      overflow-y: auto;
+    }
+    .detail h2 { font-size: 15px; margin-bottom: 16px; }
+
+    .tabs {
+      display: flex;
+      gap: 0;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 16px;
+    }
+    .tab {
+      padding: 8px 16px;
+      font-size: 13px;
+      cursor: pointer;
+      color: var(--muted);
+      border-bottom: 2px solid transparent;
+      transition: all 0.15s;
+    }
+    .tab:hover { color: var(--text); }
+    .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+    .keys-toolbar {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 12px;
+    }
+    .keys-toolbar input {
+      flex: 1;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 8px 12px;
+      border-radius: 6px;
+      font-size: 13px;
+    }
+    .btn {
+      background: var(--surface);
+      color: var(--text);
+      border: 1px solid var(--border);
+      padding: 8px 14px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 13px;
+      white-space: nowrap;
+    }
+    .btn:hover { border-color: var(--accent); }
+    .btn.danger { border-color: var(--red); color: var(--red); }
+    .btn.danger:hover { background: var(--red); color: #fff; }
+    .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+    }
+    th {
+      text-align: left;
+      padding: 8px 12px;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--muted);
+      border-bottom: 1px solid var(--border);
+    }
+    td {
+      padding: 8px 12px;
+      border-bottom: 1px solid var(--border);
+      max-width: 300px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    tr:hover td { background: var(--surface); }
+    tr { cursor: pointer; }
+
+    .badge {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 10px;
+      font-size: 11px;
+      font-weight: 500;
+    }
+    .badge.green { background: rgba(74,222,128,0.15); color: var(--green); }
+    .badge.red { background: rgba(248,113,113,0.15); color: var(--red); }
+
+    .modal-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.6);
+      z-index: 100;
+      align-items: center;
+      justify-content: center;
+    }
+    .modal-overlay.open { display: flex; }
+    .modal {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 24px;
+      width: 560px;
+      max-height: 80vh;
+      overflow-y: auto;
+    }
+    .modal h3 { font-size: 15px; margin-bottom: 16px; }
+    .modal pre {
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 16px;
+      font-size: 12px;
+      font-family: 'SF Mono', 'Fira Code', monospace;
+      overflow-x: auto;
+      white-space: pre-wrap;
+      word-break: break-all;
+      margin-bottom: 16px;
+    }
+    .modal .actions { display: flex; justify-content: flex-end; gap: 8px; }
+    .key-label {
+      font-size: 11px;
+      color: var(--muted);
+      margin-bottom: 4px;
+    }
+    .key-name {
+      font-family: 'SF Mono', 'Fira Code', monospace;
+      font-size: 13px;
+      margin-bottom: 12px;
+      word-break: break-all;
+    }
+    .toast {
+      position: fixed;
+      bottom: 20px;
+      right: 20px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      padding: 10px 16px;
+      border-radius: 8px;
+      font-size: 13px;
+      z-index: 200;
+      animation: fadeIn 0.2s;
+    }
+    .toast.error { border-color: var(--red); }
+    .toast.success { border-color: var(--green); }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+
+    .empty {
+      color: var(--muted);
+      font-size: 13px;
+      padding: 24px 16px;
+      text-align: center;
+    }
+    .loading { color: var(--muted); font-size: 13px; padding: 16px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Shudhi <span>Cache Dashboard</span></h1>
+    <div class="config-bar">
+      <label>API Base</label>
+      <input id="sidecarUrl" value="" placeholder="leave empty for same-origin proxy">
+      <button onclick="init()">Connect</button>
+    </div>
+  </header>
+
+  <div class="layout">
+    <!-- Services panel -->
+    <div class="panel" id="servicesPanel">
+      <div class="panel-header">Services <span class="count" id="svcCount">0</span></div>
+      <div id="servicesList"></div>
+    </div>
+
+    <!-- Pods panel -->
+    <div class="panel" id="podsPanel">
+      <div class="panel-header">Pods <span class="count" id="podCount">0</span></div>
+      <div id="podsList"><div class="empty">Select a service</div></div>
+    </div>
+
+    <!-- Detail panel -->
+    <div class="panel detail" id="detailPanel">
+      <div class="empty">Select a service and pod to view cached keys</div>
+    </div>
+  </div>
+
+  <!-- Value modal -->
+  <div class="modal-overlay" id="valueModal">
+    <div class="modal">
+      <h3>Cached Value</h3>
+      <div class="key-label">Key</div>
+      <div class="key-name" id="modalKeyName"></div>
+      <div class="key-label">Pod</div>
+      <div class="key-name" id="modalPodName"></div>
+      <div class="key-label">Value</div>
+      <pre id="modalValue"></pre>
+      <div class="actions">
+        <button class="btn" onclick="closeModal()">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    let state = {
+      baseUrl: '',  // empty = same-origin (nginx proxies /api/ to sidecar)
+      services: [],
+      selectedService: null,
+      pods: [],
+      selectedPod: null,
+      keys: [],
+      filter: '',
+    };
+
+    function getBaseUrl() {
+      const v = document.getElementById('sidecarUrl').value.trim().replace(/\/+$/, '');
+      return v; // empty string = same origin
+    }
+
+    async function api(path, opts = {}) {
+      const url = state.baseUrl + path;
+      try {
+        const res = await fetch(url, {
+          headers: { 'Content-Type': 'application/json' },
+          ...opts,
+        });
+        if (!res.ok) throw new Error(`${res.status} ${await res.text()}`);
+        return await res.json();
+      } catch (e) {
+        toast(e.message, 'error');
+        throw e;
+      }
+    }
+
+    async function init() {
+      state.baseUrl = getBaseUrl();
+      try {
+        const data = await api('/api/services');
+        state.services = data.services || [];
+        state.selectedService = null;
+        state.selectedPod = null;
+        state.pods = [];
+        state.keys = [];
+        renderServices();
+        renderPods();
+        renderDetail();
+        toast('Connected', 'success');
+      } catch (e) {}
+    }
+
+    // auto-connect on load
+    window.addEventListener('DOMContentLoaded', init);
+
+    async function selectService(svc) {
+      state.selectedService = svc;
+      state.selectedPod = null;
+      renderServices();
+      try {
+        const data = await api(`/api/pods?service=${encodeURIComponent(svc)}`);
+        state.pods = data.pods || [];
+        renderPods();
+        await loadKeys();
+      } catch (e) {}
+    }
+
+    async function selectPod(podName) {
+      state.selectedPod = podName;
+      renderPods();
+      await loadKeys();
+    }
+
+    async function loadKeys() {
+      if (!state.selectedService) return;
+      let url = `/api/keys?service=${encodeURIComponent(state.selectedService)}`;
+      if (state.selectedPod) url += `&pod=${encodeURIComponent(state.selectedPod)}`;
+      try {
+        const data = await api(url);
+        state.keys = data.keys || [];
+        state.filter = '';
+        renderDetail();
+      } catch (e) {}
+    }
+
+    async function getValue(serviceName, podName, key) {
+      try {
+        const data = await api('/api/pod/get', {
+          method: 'POST',
+          body: JSON.stringify({ serviceName, podName, key }),
+        });
+        document.getElementById('modalKeyName').textContent = key;
+        document.getElementById('modalPodName').textContent = podName;
+        document.getElementById('modalValue').textContent = data.found
+          ? JSON.stringify(data.value, null, 2)
+          : '(not found in cache)';
+        document.getElementById('valueModal').classList.add('open');
+      } catch (e) {}
+    }
+
+    async function refreshCache() {
+      if (!state.selectedService) return;
+      const prefix = document.getElementById('filterInput')?.value || null;
+      try {
+        await api('/api/refresh', {
+          method: 'POST',
+          body: JSON.stringify({
+            serviceName: state.selectedService,
+            keyPrefix: prefix || null,
+          }),
+        });
+        toast(`Refresh published to ${state.selectedService}`, 'success');
+      } catch (e) {}
+    }
+
+    function closeModal() {
+      document.getElementById('valueModal').classList.remove('open');
+    }
+
+    // --- Rendering ---
+
+    function renderServices() {
+      const el = document.getElementById('servicesList');
+      document.getElementById('svcCount').textContent = state.services.length;
+      if (!state.services.length) {
+        el.innerHTML = '<div class="empty">No services found</div>';
+        return;
+      }
+      el.innerHTML = state.services.map(svc =>
+        `<div class="list-item ${svc === state.selectedService ? 'active' : ''}"
+              onclick="selectService('${esc(svc)}')">${esc(svc)}</div>`
+      ).join('');
+    }
+
+    function renderPods() {
+      const el = document.getElementById('podsList');
+      document.getElementById('podCount').textContent = state.pods.length;
+      if (!state.selectedService) {
+        el.innerHTML = '<div class="empty">Select a service</div>';
+        return;
+      }
+      if (!state.pods.length) {
+        el.innerHTML = '<div class="empty">No live pods</div>';
+        return;
+      }
+      let html = `<div class="list-item ${state.selectedPod === null ? 'active' : ''}"
+                       onclick="selectPod(null)">All pods</div>`;
+      html += state.pods.map(p =>
+        `<div class="list-item ${p.podName === state.selectedPod ? 'active' : ''}"
+              onclick="selectPod('${esc(p.podName)}')">
+          <div>${esc(p.podName)}</div>
+          <div class="sub">${esc(p.sidecarUrl)}</div>
+        </div>`
+      ).join('');
+      el.innerHTML = html;
+    }
+
+    function renderDetail() {
+      const el = document.getElementById('detailPanel');
+      if (!state.selectedService) {
+        el.innerHTML = '<div class="empty">Select a service and pod to view cached keys</div>';
+        return;
+      }
+
+      const filtered = state.keys.filter(k =>
+        !state.filter || k.keyName.toLowerCase().includes(state.filter.toLowerCase())
+      );
+
+      el.innerHTML = `
+        <h2>Keys — ${esc(state.selectedService)} ${state.selectedPod ? '/ ' + esc(state.selectedPod) : '(all pods)'}</h2>
+        <div class="keys-toolbar">
+          <input id="filterInput" placeholder="Filter keys..." value="${esc(state.filter)}"
+                 oninput="state.filter=this.value; renderDetail()">
+          <button class="btn danger" onclick="refreshCache()">Refresh Cache</button>
+        </div>
+        ${filtered.length === 0
+          ? '<div class="empty">No keys found</div>'
+          : `<table>
+              <thead><tr>
+                <th>Key</th>
+                <th>Pod</th>
+                <th>TTL</th>
+                <th>Registered</th>
+                <th></th>
+              </tr></thead>
+              <tbody>${filtered.map(k => `
+                <tr onclick="getValue('${esc(state.selectedService)}', '${esc(k.podName)}', '${esc(k.keyName)}')">
+                  <td title="${esc(k.keyName)}">${esc(k.keyName)}</td>
+                  <td>${esc(shortPod(k.podName))}</td>
+                  <td>${k.ttlInSeconds ? k.ttlInSeconds + 's' : '—'}</td>
+                  <td>${k.registeredAt ? timeAgo(k.registeredAt) : '—'}</td>
+                  <td><button class="btn" onclick="event.stopPropagation(); getValue('${esc(state.selectedService)}', '${esc(k.podName)}', '${esc(k.keyName)}')">Get</button></td>
+                </tr>`).join('')}
+              </tbody>
+            </table>`
+        }
+        <div style="margin-top:8px;color:var(--muted);font-size:12px">${filtered.length} key${filtered.length!==1?'s':''}</div>
+      `;
+    }
+
+    // --- Helpers ---
+
+    function esc(s) {
+      if (s == null) return '';
+      return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+    }
+
+    function shortPod(name) {
+      if (!name) return '';
+      const parts = name.split('-');
+      return parts.length > 2 ? '...' + parts.slice(-2).join('-') : name;
+    }
+
+    function timeAgo(iso) {
+      const diff = Date.now() - new Date(iso).getTime();
+      const mins = Math.floor(diff / 60000);
+      if (mins < 1) return 'just now';
+      if (mins < 60) return mins + 'm ago';
+      const hrs = Math.floor(mins / 60);
+      if (hrs < 24) return hrs + 'h ago';
+      return Math.floor(hrs / 24) + 'd ago';
+    }
+
+    function toast(msg, type = '') {
+      const el = document.createElement('div');
+      el.className = `toast ${type}`;
+      el.textContent = msg;
+      document.body.appendChild(el);
+      setTimeout(() => el.remove(), 3000);
+    }
+
+    document.getElementById('valueModal').addEventListener('click', e => {
+      if (e.target === e.currentTarget) closeModal();
+    });
+  </script>
+</body>
+</html>

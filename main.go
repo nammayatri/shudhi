@@ -14,29 +14,24 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	s, err := NewSidecar(cfg)
-	if err != nil {
-		log.Fatalf("init: %v", err)
-	}
+	s := NewSidecar(cfg)
 
-	// register and start heartbeat
-	if err := s.Register(ctx); err != nil {
-		log.Fatalf("register: %v", err)
-	}
-	go s.Heartbeat(ctx)
-	go s.SubscribePubSub(ctx)
-
+	// start HTTP server immediately — health + registerKey always work
 	srv := &http.Server{Addr: ":" + cfg.SidecarPort, Handler: s.Routes()}
-
 	go func() {
 		log.Printf("sidecar listening on :%s", cfg.SidecarPort)
 		if err := srv.ListenAndServe(); err != http.ErrServerClosed {
-			log.Fatalf("http: %v", err)
+			log.Printf("http server error: %v", err)
 		}
 	}()
 
+	// connect to app in background — retries until success or shutdown
+	go s.WaitForApp(ctx)
+
 	<-ctx.Done()
 	log.Println("shutting down...")
-	s.Deregister(context.Background())
+	if s.IsReady() {
+		s.Deregister(context.Background())
+	}
 	srv.Close()
 }

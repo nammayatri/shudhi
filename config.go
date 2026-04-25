@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
+	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -16,15 +19,20 @@ type Config struct {
 	AppURL      string
 	SidecarPort string
 	RedisURL    string
+	RedisDB     int
 	PodIP       string
+	InMemToken  string
 }
 
 func LoadConfig() Config {
+	db, _ := strconv.Atoi(envOrDefault("REDIS_DB", "0"))
 	return Config{
 		AppURL:      envOrDefault("APP_URL", "http://localhost:8080"),
 		SidecarPort: envOrDefault("SIDECAR_PORT", "8900"),
 		RedisURL:    envOrDefault("REDIS_URL", "localhost:6379"),
+		RedisDB:     db,
 		PodIP:       envOrDefault("POD_IP", "127.0.0.1"),
+		InMemToken:  os.Getenv("INMEM_TOKEN"),
 	}
 }
 
@@ -35,44 +43,73 @@ func envOrDefault(key, fallback string) string {
 	return fallback
 }
 
-// App identity, fetched once at startup
 type AppInfo struct {
 	ServiceName string `json:"serviceName"`
 	PodName     string `json:"podName"`
 }
 
-// Sidecar holds all shared state
 type Sidecar struct {
 	Config  Config
 	Redis   *redis.Client
 	AppInfo AppInfo
 	HTTP    *http.Client
+	ready   atomic.Bool // true once app info is fetched and registered
 }
 
-func NewSidecar(cfg Config) (*Sidecar, error) {
-	rdb := redis.NewClient(&redis.Options{Addr: cfg.RedisURL})
-	if err := rdb.Ping(context.Background()).Err(); err != nil {
-		return nil, fmt.Errorf("redis: %w", err)
-	}
-
-	s := &Sidecar{
+func NewSidecar(cfg Config) *Sidecar {
+	rdb := redis.NewClient(&redis.Options{Addr: cfg.RedisURL, DB: cfg.RedisDB})
+	return &Sidecar{
 		Config: cfg,
 		Redis:  rdb,
 		HTTP:   &http.Client{Timeout: 5 * time.Second},
 	}
+}
+
+// WaitForApp retries fetching app info until it succeeds or ctx is cancelled.
+// Once connected, registers in Redis and starts heartbeat + pubsub.
+func (s *Sidecar) WaitForApp(ctx context.Context) {
+	for {
+		if err := s.tryConnect(ctx); err != nil {
+			log.Printf("waiting for app: %v (retrying in 10s)", err)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(10 * time.Second):
+				continue
+			}
+		}
+		return
+	}
+}
+
+func (s *Sidecar) tryConnect(ctx context.Context) error {
+	if err := s.Redis.Ping(ctx).Err(); err != nil {
+		return fmt.Errorf("redis: %w", err)
+	}
 
 	info, err := s.fetchAppInfo()
 	if err != nil {
-		return nil, fmt.Errorf("app serverInfo: %w", err)
+		return fmt.Errorf("app serverInfo: %w", err)
 	}
 	s.AppInfo = info
 	log.Printf("connected to app: service=%s pod=%s", info.ServiceName, info.PodName)
 
-	return s, nil
+	if err := s.Register(ctx); err != nil {
+		return fmt.Errorf("register: %w", err)
+	}
+
+	s.ready.Store(true)
+	go s.Heartbeat(ctx)
+	go s.SubscribePubSub(ctx)
+	return nil
+}
+
+func (s *Sidecar) IsReady() bool {
+	return s.ready.Load()
 }
 
 func (s *Sidecar) fetchAppInfo() (AppInfo, error) {
-	resp, err := s.HTTP.Get(s.Config.AppURL + "/internal/inMem/serverInfo")
+	resp, err := s.doGet(s.Config.AppURL + "/internal/inMem/serverInfo")
 	if err != nil {
 		return AppInfo{}, err
 	}
@@ -84,7 +121,6 @@ func (s *Sidecar) fetchAppInfo() (AppInfo, error) {
 	return info, nil
 }
 
-// Redis key helpers
 func (s *Sidecar) podKey() string {
 	return fmt.Sprintf("inmem:pod:%s:%s", s.AppInfo.ServiceName, s.AppInfo.PodName)
 }
@@ -97,7 +133,29 @@ func (s *Sidecar) sidecarURL() string {
 	return fmt.Sprintf("http://%s:%s", s.Config.PodIP, s.Config.SidecarPort)
 }
 
-// pub/sub channels
+func (s *Sidecar) doPost(url, contentType string, body io.Reader) (*http.Response, error) {
+	req, err := http.NewRequest("POST", url, body)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", contentType)
+	if s.Config.InMemToken != "" {
+		req.Header.Set("x-inmem-token", s.Config.InMemToken)
+	}
+	return s.HTTP.Do(req)
+}
+
+func (s *Sidecar) doGet(url string) (*http.Response, error) {
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	if s.Config.InMemToken != "" {
+		req.Header.Set("x-inmem-token", s.Config.InMemToken)
+	}
+	return s.HTTP.Do(req)
+}
+
 func pubsubChannel(serviceName string) string {
 	return fmt.Sprintf("inmem:%s", serviceName)
 }

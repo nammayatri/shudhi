@@ -32,6 +32,7 @@ Every sidecar connects to the same Redis. Discovery (list services, pods, keys) 
 | `SIDECAR_PORT` | `8900` | Port the sidecar listens on |
 | `REDIS_URL` | `localhost:6379` | Redis address |
 | `POD_IP` | `127.0.0.1` | Pod IP (from k8s downward API) |
+| `INMEM_TOKEN` | _(empty)_ | If set, sent as `x-inmem-token` header on all calls to the app and between sidecars |
 
 ## Running
 
@@ -160,6 +161,8 @@ The app must expose these endpoints under `/internal/inMem/`:
 | `POST` | `/internal/inMem/refresh` | Deletes cached entries by prefix (or all) |
 
 The sidecar calls `/serverInfo` once at startup to learn its identity. `/get` and `/refresh` are called on demand.
+
+If `INMEM_TOKEN` is set, every request to these endpoints includes the `x-inmem-token` header. The app can use this to verify that requests are coming from a trusted sidecar.
 
 ## Pod Liveness
 
