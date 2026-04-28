@@ -8,7 +8,6 @@ import (
 	"log"
 	"strings"
 	"time"
-
 )
 
 type PubSubMessage struct {
@@ -18,29 +17,49 @@ type PubSubMessage struct {
 	Timestamp string          `json:"timestamp"`
 }
 
-// Subscribe to two channels:
-// 1. inmem:<serviceName>        — broadcast ops (refresh) from any sidecar
-// 2. inmem:req:<svc>:<podName>  — targeted requests (get) for this pod
+// SubscribePubSub subscribes to broadcast and targeted channels.
+// It automatically reconnects on failure until ctx is cancelled.
 func (s *Sidecar) SubscribePubSub(ctx context.Context) {
+	for {
+		err := s.runPubSubLoop(ctx)
+		if ctx.Err() != nil {
+			return // shutting down
+		}
+		log.Printf("pubsub disconnected: %v — reconnecting in 3s", err)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(3 * time.Second):
+		}
+	}
+}
+
+func (s *Sidecar) runPubSubLoop(ctx context.Context) error {
 	broadcastCh := pubsubChannel(s.AppInfo.ServiceName)
 	requestCh := podRequestChannel(s.AppInfo.ServiceName, s.AppInfo.PodName)
 
 	sub := s.Redis.Subscribe(ctx, broadcastCh, requestCh)
-	ch := sub.Channel()
+	defer sub.Close()
 
+	// confirm subscription is active before proceeding
+	if _, err := sub.Receive(ctx); err != nil {
+		return fmt.Errorf("subscribe confirm: %w", err)
+	}
+
+	ch := sub.Channel()
 	log.Printf("subscribed to [%s, %s]", broadcastCh, requestCh)
+
 	for {
 		select {
 		case <-ctx.Done():
-			sub.Close()
-			return
-		case msg := <-ch:
-			if msg == nil {
-				return
+			return ctx.Err()
+		case msg, ok := <-ch:
+			if !ok {
+				return fmt.Errorf("channel closed")
 			}
 			switch msg.Channel {
 			case broadcastCh:
-				s.handleBroadcast(msg.Payload)
+				s.handleBroadcast(ctx, msg.Payload)
 			case requestCh:
 				s.handlePodRequest(ctx, msg.Payload)
 			}
@@ -48,7 +67,7 @@ func (s *Sidecar) SubscribePubSub(ctx context.Context) {
 	}
 }
 
-func (s *Sidecar) handleBroadcast(payload string) {
+func (s *Sidecar) handleBroadcast(ctx context.Context, payload string) {
 	var m PubSubMessage
 	if err := json.Unmarshal([]byte(payload), &m); err != nil {
 		log.Printf("pubsub: bad message: %v", err)
@@ -59,18 +78,44 @@ func (s *Sidecar) handleBroadcast(payload string) {
 	}
 	switch m.Action {
 	case "refresh":
+		s.applyRefreshWithRetry(ctx, m)
+	}
+}
+
+func (s *Sidecar) applyRefreshWithRetry(ctx context.Context, m PubSubMessage) {
+	var lastErr error
+	for attempt := 1; attempt <= maxBroadcastRetries; attempt++ {
 		resp, err := s.doPost(
+			ctx,
 			s.Config.AppURL+"/internal/inMem/refresh",
 			"application/json",
 			strings.NewReader(string(m.Payload)),
 		)
 		if err != nil {
-			log.Printf("pubsub refresh failed: %v", err)
-			return
+			lastErr = err
+			log.Printf("pubsub refresh attempt %d/%d failed: %v", attempt, maxBroadcastRetries, err)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(time.Duration(attempt) * time.Second):
+			}
+			continue
 		}
-		resp.Body.Close()
+		drainClose(resp)
+		if resp.StatusCode >= 500 {
+			lastErr = fmt.Errorf("app returned %d", resp.StatusCode)
+			log.Printf("pubsub refresh attempt %d/%d: %v", attempt, maxBroadcastRetries, lastErr)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(time.Duration(attempt) * time.Second):
+			}
+			continue
+		}
 		log.Printf("refresh from %s applied", m.OriginPod)
+		return
 	}
+	log.Printf("pubsub refresh from %s failed after %d retries: %v", m.OriginPod, maxBroadcastRetries, lastErr)
 }
 
 // PodRequest is a targeted request sent to a specific pod via pub/sub
@@ -89,6 +134,7 @@ func (s *Sidecar) handlePodRequest(ctx context.Context, payload string) {
 	switch req.Action {
 	case "get":
 		resp, err := s.doPost(
+			ctx,
 			s.Config.AppURL+"/internal/inMem/get",
 			"application/json",
 			strings.NewReader(string(req.Payload)),
@@ -97,7 +143,7 @@ func (s *Sidecar) handlePodRequest(ctx context.Context, payload string) {
 			s.Redis.Publish(ctx, req.ReplyTo, `{"error":"app unreachable"}`)
 			return
 		}
-		defer resp.Body.Close()
+		defer drainClose(resp)
 		body, _ := io.ReadAll(resp.Body)
 		s.Redis.Publish(ctx, req.ReplyTo, string(body))
 	}

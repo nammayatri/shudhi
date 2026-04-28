@@ -87,7 +87,7 @@ func (s *Sidecar) tryConnect(ctx context.Context) error {
 		return fmt.Errorf("redis: %w", err)
 	}
 
-	info, err := s.fetchAppInfo()
+	info, err := s.fetchAppInfo(ctx)
 	if err != nil {
 		return fmt.Errorf("app serverInfo: %w", err)
 	}
@@ -108,12 +108,12 @@ func (s *Sidecar) IsReady() bool {
 	return s.ready.Load()
 }
 
-func (s *Sidecar) fetchAppInfo() (AppInfo, error) {
-	resp, err := s.doGet(s.Config.AppURL + "/internal/inMem/serverInfo")
+func (s *Sidecar) fetchAppInfo(ctx context.Context) (AppInfo, error) {
+	resp, err := s.doGet(ctx, s.Config.AppURL+"/internal/inMem/serverInfo")
 	if err != nil {
 		return AppInfo{}, err
 	}
-	defer resp.Body.Close()
+	defer drainClose(resp)
 	var info AppInfo
 	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
 		return AppInfo{}, err
@@ -133,8 +133,8 @@ func (s *Sidecar) sidecarURL() string {
 	return fmt.Sprintf("http://%s:%s", s.Config.PodIP, s.Config.SidecarPort)
 }
 
-func (s *Sidecar) doPost(url, contentType string, body io.Reader) (*http.Response, error) {
-	req, err := http.NewRequest("POST", url, body)
+func (s *Sidecar) doPost(ctx context.Context, url, contentType string, body io.Reader) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, "POST", url, body)
 	if err != nil {
 		return nil, err
 	}
@@ -145,8 +145,8 @@ func (s *Sidecar) doPost(url, contentType string, body io.Reader) (*http.Respons
 	return s.HTTP.Do(req)
 }
 
-func (s *Sidecar) doGet(url string) (*http.Response, error) {
-	req, err := http.NewRequest("GET", url, nil)
+func (s *Sidecar) doGet(ctx context.Context, url string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -154,6 +154,12 @@ func (s *Sidecar) doGet(url string) (*http.Response, error) {
 		req.Header.Set("x-inmem-token", s.Config.InMemToken)
 	}
 	return s.HTTP.Do(req)
+}
+
+// drainClose drains and closes a response body to allow connection reuse.
+func drainClose(resp *http.Response) {
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
 }
 
 func pubsubChannel(serviceName string) string {

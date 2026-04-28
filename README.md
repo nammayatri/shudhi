@@ -117,7 +117,7 @@ Invalidate cache entries across all pods of a service. Publishes to the service'
 // Request
 {
   "serviceName": "rider-app",
-  "keyPrefix": "RouteByRouteId"    // null to clear all
+  "keyInfix": "RouteByRouteId"    // null to clear all
 }
 
 // Response

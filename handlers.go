@@ -11,6 +11,8 @@ import (
 	"time"
 )
 
+const maxBroadcastRetries = 3
+
 func (s *Sidecar) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/registerKey", s.handleRegisterKey)
@@ -227,21 +229,34 @@ func (s *Sidecar) handlePodGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	ctx := r.Context()
+
 	// if it's this pod, call local app directly
 	if req.PodName == s.AppInfo.PodName && req.ServiceName == s.AppInfo.ServiceName {
-		s.proxyGetToApp(w, req.Key)
+		s.proxyGetToApp(ctx, w, req.Key)
+		return
+	}
+
+	// prevent infinite proxy loops
+	if r.Header.Get("X-Shudhi-Proxied") != "" {
+		http.Error(w, "proxy loop detected", http.StatusLoopDetected)
 		return
 	}
 
 	// try direct HTTP to target sidecar
 	podRedisKey := fmt.Sprintf("inmem:pod:%s:%s", req.ServiceName, req.PodName)
-	targetURL, err := s.Redis.Get(r.Context(), podRedisKey).Result()
+	targetURL, err := s.Redis.Get(ctx, podRedisKey).Result()
 	if err == nil {
 		body, _ := json.Marshal(map[string]string{"key": req.Key})
-		resp, httpErr := s.doPost(targetURL+"/api/pod/get", "application/json",
-			strings.NewReader(string(body)))
+		proxyReq, _ := http.NewRequestWithContext(ctx, "POST", targetURL+"/api/pod/get", strings.NewReader(string(body)))
+		proxyReq.Header.Set("Content-Type", "application/json")
+		proxyReq.Header.Set("X-Shudhi-Proxied", "true")
+		if s.Config.InMemToken != "" {
+			proxyReq.Header.Set("x-inmem-token", s.Config.InMemToken)
+		}
+		resp, httpErr := s.HTTP.Do(proxyReq)
 		if httpErr == nil {
-			defer resp.Body.Close()
+			defer drainClose(resp)
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(resp.StatusCode)
 			io.Copy(w, resp.Body)
@@ -251,7 +266,7 @@ func (s *Sidecar) handlePodGet(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// fallback: pub/sub RPC
-	result, err := s.pubsubGet(r.Context(), req.ServiceName, req.PodName, req.Key)
+	result, err := s.pubsubGet(ctx, req.ServiceName, req.PodName, req.Key)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("pod unreachable: %v", err), http.StatusBadGateway)
 		return
@@ -260,14 +275,14 @@ func (s *Sidecar) handlePodGet(w http.ResponseWriter, r *http.Request) {
 	w.Write(result)
 }
 
-func (s *Sidecar) proxyGetToApp(w http.ResponseWriter, key string) {
+func (s *Sidecar) proxyGetToApp(ctx context.Context, w http.ResponseWriter, key string) {
 	body, _ := json.Marshal(map[string]string{"key": key})
-	resp, err := s.doPost(s.Config.AppURL+"/internal/inMem/get", "application/json", strings.NewReader(string(body)))
+	resp, err := s.doPost(ctx, s.Config.AppURL+"/internal/inMem/get", "application/json", strings.NewReader(string(body)))
 	if err != nil {
 		http.Error(w, fmt.Sprintf("app unreachable: %v", err), http.StatusBadGateway)
 		return
 	}
-	defer resp.Body.Close()
+	defer drainClose(resp)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(resp.StatusCode)
 	io.Copy(w, resp.Body)
@@ -277,7 +292,7 @@ func (s *Sidecar) proxyGetToApp(w http.ResponseWriter, key string) {
 
 type RefreshReq struct {
 	ServiceName string  `json:"serviceName"`
-	KeyPrefix   *string `json:"keyPrefix"`
+	KeyInfix   *string `json:"keyInfix"`
 }
 
 func (s *Sidecar) handleRefresh(w http.ResponseWriter, r *http.Request) {
@@ -287,27 +302,45 @@ func (s *Sidecar) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	appPayload, _ := json.Marshal(map[string]any{"keyPrefix": req.KeyPrefix})
+	ctx := r.Context()
+	appPayload, _ := json.Marshal(map[string]any{"keyInfix": req.KeyInfix})
 
+	var localErr error
 	// if this sidecar is part of the target service, also refresh locally
 	if req.ServiceName == s.AppInfo.ServiceName {
-		resp, err := s.doPost(s.Config.AppURL+"/internal/inMem/refresh", "application/json",
+		resp, err := s.doPost(ctx, s.Config.AppURL+"/internal/inMem/refresh", "application/json",
 			strings.NewReader(string(appPayload)))
 		if err != nil {
-			http.Error(w, fmt.Sprintf("app unreachable: %v", err), http.StatusBadGateway)
-			return
+			localErr = err
+			log.Printf("local refresh failed (will still broadcast): %v", err)
+		} else {
+			drainClose(resp)
 		}
-		resp.Body.Close()
 	}
 
-	// broadcast to all sidecars of that service
-	if err := s.publishRefresh(r.Context(), req.ServiceName, appPayload); err != nil {
-		http.Error(w, fmt.Sprintf("publish failed: %v", err), http.StatusInternalServerError)
+	// always attempt broadcast even if local refresh failed —
+	// other pods still need to be refreshed
+	publishErr := s.publishRefresh(ctx, req.ServiceName, appPayload)
+	if publishErr != nil {
+		log.Printf("publish refresh failed: %v", publishErr)
+	}
+
+	// report combined status
+	if localErr != nil && publishErr != nil {
+		http.Error(w, fmt.Sprintf("local: %v, publish: %v", localErr, publishErr), http.StatusInternalServerError)
+		return
+	}
+	if publishErr != nil {
+		http.Error(w, fmt.Sprintf("local refreshed but broadcast failed: %v", publishErr), http.StatusInternalServerError)
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{"published": true, "service": req.ServiceName})
+	resp := map[string]any{"published": true, "service": req.ServiceName}
+	if localErr != nil {
+		resp["localError"] = localErr.Error()
+	}
+	json.NewEncoder(w).Encode(resp)
 }
 
 // --- health ---

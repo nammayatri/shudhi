@@ -406,7 +406,7 @@
           method: 'POST',
           body: JSON.stringify({
             serviceName: state.selectedService,
-            keyPrefix: prefix || null,
+            keyInfix: prefix || null,
           }),
         });
         toast(`Refresh published to ${state.selectedService}`, 'success');
@@ -462,40 +462,67 @@
         return;
       }
 
+      // If the skeleton (toolbar + table container) doesn't exist yet, create it
+      if (!el.querySelector('.keys-toolbar')) {
+        el.innerHTML = `
+          <h2 id="detailTitle"></h2>
+          <div class="keys-toolbar">
+            <input id="filterInput" placeholder="Filter keys..." value="">
+            <button class="btn danger" onclick="refreshCache()">Refresh Cache</button>
+          </div>
+          <div id="keysTableContainer"></div>
+          <div id="keysCountLabel" style="margin-top:8px;color:var(--muted);font-size:12px"></div>
+        `;
+        document.getElementById('filterInput').addEventListener('input', function() {
+          state.filter = this.value;
+          renderKeysTable();
+        });
+      }
+
+      document.getElementById('detailTitle').textContent =
+        `Keys — ${state.selectedService} ${state.selectedPod ? '/ ' + state.selectedPod : '(all pods)'}`;
+
+      // sync filter input value (e.g. after loadKeys resets filter)
+      const filterEl = document.getElementById('filterInput');
+      if (filterEl !== document.activeElement) {
+        filterEl.value = state.filter;
+      }
+
+      renderKeysTable();
+    }
+
+    function renderKeysTable() {
+      const container = document.getElementById('keysTableContainer');
+      const countLabel = document.getElementById('keysCountLabel');
+      if (!container) return;
+
       const filtered = state.keys.filter(k =>
         !state.filter || k.keyName.toLowerCase().includes(state.filter.toLowerCase())
       );
 
-      el.innerHTML = `
-        <h2>Keys — ${esc(state.selectedService)} ${state.selectedPod ? '/ ' + esc(state.selectedPod) : '(all pods)'}</h2>
-        <div class="keys-toolbar">
-          <input id="filterInput" placeholder="Filter keys..." value="${esc(state.filter)}"
-                 oninput="state.filter=this.value; renderDetail()">
-          <button class="btn danger" onclick="refreshCache()">Refresh Cache</button>
-        </div>
-        ${filtered.length === 0
-          ? '<div class="empty">No keys found</div>'
-          : `<table>
-              <thead><tr>
-                <th>Key</th>
-                <th>Pod</th>
-                <th>TTL</th>
-                <th>Registered</th>
-                <th></th>
-              </tr></thead>
-              <tbody>${filtered.map(k => `
-                <tr onclick="getValue('${esc(state.selectedService)}', '${esc(k.podName)}', '${esc(k.keyName)}')">
-                  <td title="${esc(k.keyName)}">${esc(k.keyName)}</td>
-                  <td>${esc(shortPod(k.podName))}</td>
-                  <td>${k.ttlInSeconds ? k.ttlInSeconds + 's' : '—'}</td>
-                  <td>${k.registeredAt ? timeAgo(k.registeredAt) : '—'}</td>
-                  <td><button class="btn" onclick="event.stopPropagation(); getValue('${esc(state.selectedService)}', '${esc(k.podName)}', '${esc(k.keyName)}')">Get</button></td>
-                </tr>`).join('')}
-              </tbody>
-            </table>`
-        }
-        <div style="margin-top:8px;color:var(--muted);font-size:12px">${filtered.length} key${filtered.length!==1?'s':''}</div>
-      `;
+      if (filtered.length === 0) {
+        container.innerHTML = '<div class="empty">No keys found</div>';
+      } else {
+        container.innerHTML = `<table>
+          <thead><tr>
+            <th>Key</th>
+            <th>Pod</th>
+            <th>TTL</th>
+            <th>Registered</th>
+            <th></th>
+          </tr></thead>
+          <tbody>${filtered.map(k => `
+            <tr onclick="getValue('${esc(state.selectedService)}', '${esc(k.podName)}', '${esc(k.keyName)}')">
+              <td title="${esc(k.keyName)}">${esc(k.keyName)}</td>
+              <td>${esc(shortPod(k.podName))}</td>
+              <td>${k.ttlInSeconds ? k.ttlInSeconds + 's' : '—'}</td>
+              <td>${k.registeredAt ? timeAgo(k.registeredAt) : '—'}</td>
+              <td><button class="btn" onclick="event.stopPropagation(); getValue('${esc(state.selectedService)}', '${esc(k.podName)}', '${esc(k.keyName)}')">Get</button></td>
+            </tr>`).join('')}
+          </tbody>
+        </table>`;
+      }
+      countLabel.textContent = `${filtered.length} key${filtered.length !== 1 ? 's' : ''}`;
     }
 
     // --- Helpers ---
