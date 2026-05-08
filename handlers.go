@@ -247,14 +247,14 @@ func (s *Sidecar) handlePodGet(w http.ResponseWriter, r *http.Request) {
 	podRedisKey := fmt.Sprintf("inmem:pod:%s:%s", req.ServiceName, req.PodName)
 	targetURL, err := s.Redis.Get(ctx, podRedisKey).Result()
 	if err == nil {
-		body, _ := json.Marshal(map[string]string{"key": req.Key})
+		body, _ := json.Marshal(PodGetReq{ServiceName: req.ServiceName, PodName: req.PodName, Key: req.Key})
 		proxyReq, _ := http.NewRequestWithContext(ctx, "POST", targetURL+"/api/pod/get", strings.NewReader(string(body)))
 		proxyReq.Header.Set("Content-Type", "application/json")
 		proxyReq.Header.Set("X-Shudhi-Proxied", "true")
 		if s.Config.InMemToken != "" {
 			proxyReq.Header.Set("x-inmem-token", s.Config.InMemToken)
 		}
-		resp, httpErr := s.HTTP.Do(proxyReq)
+		resp, httpErr := s.ProxyHTTP.Do(proxyReq)
 		if httpErr == nil {
 			defer drainClose(resp)
 			w.Header().Set("Content-Type", "application/json")

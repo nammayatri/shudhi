@@ -1,179 +1,118 @@
 # Shudhi
 
-A sidecar for managing in-memory caches across services. Deploy alongside any app that implements the [InMem Management Protocol](#app-contract), and get cross-service cache visibility, targeted key lookups, and coordinated cache invalidation — all through a shared Redis.
-
-## Architecture
+A sidecar for managing in-memory caches across services. Deploy it alongside your app to get cache visibility, key lookups, and coordinated invalidation — all through Redis.
 
 ```
-                    ┌──────────────────────────┐
-                    │          Redis            │
-                    │                           │
-                    │  inmem:pod:<svc>:<pod>     │  pod liveness (TTL 60s)
-                    │  inmem:keys:<svc>:<pod>    │  key registry (TTL 3d)
-                    │  inmem:<svc>      (pubsub) │  broadcast refresh
-                    │  inmem:req:<svc>:<pod>     │  targeted get (pubsub RPC)
-                    └────────┬─────────────────┘
-                             │
-              ┌──────────────┼──────────────┐
-              │              │              │
-         Sidecar A      Sidecar B      Sidecar C
-         (svc: rider)   (svc: rider)   (svc: driver)
-              │              │              │
-         App Pod A      App Pod B      App Pod C
+           Redis (shared)
+               │
+    ┌──────────┼──────────┐
+    │          │          │
+ Sidecar A  Sidecar B  Sidecar C
+    │          │          │
+ App Pod A  App Pod B  App Pod C
 ```
 
-Every sidecar connects to the same Redis. Discovery (list services, pods, keys) works from any sidecar. Interaction (get value, refresh) routes to the right place via Redis pub/sub — no direct sidecar-to-sidecar HTTP required.
+## Quick Start
 
-## Configuration
+```bash
+APP_URL=http://localhost:8080 REDIS_URL=localhost:6379 go run .
+```
 
 | Env Var | Default | Description |
 |---------|---------|-------------|
-| `APP_URL` | `http://localhost:8080` | Local app's base URL |
-| `SIDECAR_PORT` | `8900` | Port the sidecar listens on |
+| `APP_URL` | `http://localhost:8080` | Your app's base URL |
+| `SIDECAR_PORT` | `8900` | Sidecar listen port |
 | `REDIS_URL` | `localhost:6379` | Redis address |
-| `POD_IP` | `127.0.0.1` | Pod IP (from k8s downward API) |
-| `INMEM_TOKEN` | _(empty)_ | If set, sent as `x-inmem-token` header on all calls to the app and between sidecars |
+| `POD_IP` | `127.0.0.1` | Pod IP (k8s downward API) |
+| `INMEM_TOKEN` | _(empty)_ | Shared auth token between sidecar and app |
 
-## Running
+## Integrating Your App
 
-```bash
-# Binary
-APP_URL=http://localhost:8080 REDIS_URL=localhost:6379 go run .
+Your app needs to expose 3 endpoints and make 1 optional call:
 
-# Docker
-docker run -e APP_URL=http://localhost:8080 -e REDIS_URL=redis:6379 ghcr.io/<owner>/shudhi
+### 1. Tell the sidecar who you are (required)
+
+```
+GET /internal/inMem/serverInfo
+→ { "serviceName": "rider-app", "podName": "rider-app-7b4f8d6c9-x2k4m" }
 ```
 
-## API
+Called once at startup. The sidecar uses this to register itself in Redis.
 
-All endpoints are served by the sidecar. The dashboard (or any client) only needs to reach one sidecar to interact with any service.
+### 2. Return a cached value on demand (required)
 
-### Discovery (reads from Redis, works from any sidecar)
-
-#### `GET /api/services`
-
-List all registered services.
-
-```json
-{ "services": ["rider-app", "driver-app", "payment-service"] }
+```
+POST /internal/inMem/get
+← { "key": "RouteByRouteId:config-id:route-123" }
+→ { "found": true, "value": { "vehicleType": "SUV" } }
 ```
 
-#### `GET /api/pods?service=rider-app`
+### 3. Clear cache entries on demand (required)
 
-List live pods for a service.
-
-```json
-{
-  "pods": [
-    { "podName": "rider-app-7b4f8d6c9-x2k4m", "sidecarUrl": "http://10.0.3.42:8900" }
-  ]
-}
+```
+POST /internal/inMem/refresh
+← { "keyInfix": "RouteByRouteId" }   // or null to clear all
+→ 200 OK
 ```
 
-#### `GET /api/keys?service=rider-app&pod=<optional>`
+Delete any cached entries whose key contains the given `keyInfix`. If `null`, clear everything.
 
-List registered cache keys. If `pod` is omitted, returns keys across all pods.
+### 4. Register cached keys (optional, enables dashboard visibility)
 
-```json
-{
-  "keys": [
-    {
-      "keyName": "RouteByRouteId:config-id:route-123",
-      "keySchema": null,
-      "ttlInSeconds": 3600,
-      "registeredAt": "2026-04-24T10:30:00Z",
-      "podName": "rider-app-7b4f8d6c9-x2k4m"
-    }
-  ]
-}
+Whenever your app caches something, tell the sidecar:
+
 ```
-
-### Interaction (routes to the correct service/pod)
-
-#### `POST /api/pod/get`
-
-Get a cached value from a specific pod. Tries direct HTTP to the target sidecar, falls back to Redis pub/sub RPC.
-
-```json
-// Request
-{
-  "serviceName": "rider-app",
-  "podName": "rider-app-7b4f8d6c9-x2k4m",
-  "key": "RouteByRouteId:config-id:route-123"
-}
-
-// Response (proxied from app)
-{
-  "found": true,
-  "value": { "vehicleType": "SUV", "category": "premium" }
-}
-```
-
-#### `POST /api/refresh`
-
-Invalidate cache entries across all pods of a service. Publishes to the service's Redis pub/sub channel.
-
-```json
-// Request
-{
-  "serviceName": "rider-app",
-  "keyInfix": "RouteByRouteId"    // null to clear all
-}
-
-// Response
-{ "published": true, "service": "rider-app" }
-```
-
-### App-facing
-
-#### `POST /api/registerKey`
-
-Called by the app to register a cached key with the sidecar.
-
-```json
+POST http://localhost:8900/api/registerKey
 {
   "keyName": "RouteByRouteId:config-id:route-123",
-  "keySchema": { "type": "object", "properties": { "vehicleType": { "type": "string" } } },
+  "keySchema": null,
   "ttlInSeconds": 3600
 }
 ```
 
-Stored in Redis hash `inmem:keys:<serviceName>:<podName>` with a 3-day TTL.
+This makes the key visible in the dashboard. If the sidecar isn't ready yet, the call is silently accepted.
 
-### Infra
+> If `INMEM_TOKEN` is set, the sidecar sends it as `x-inmem-token` header on all calls to your app. Use it to verify requests come from a trusted sidecar.
 
-#### `GET /api/health`
+## Sidecar API
 
-```json
-{ "redis": true, "app": true }
-```
+All endpoints work from any sidecar — the dashboard only needs to reach one.
 
-Returns `503` if either Redis or the app is unreachable.
+| Method | Endpoint | What it does |
+|--------|----------|-------------|
+| `GET` | `/api/services` | List all services |
+| `GET` | `/api/pods?service=X` | List live pods for a service |
+| `GET` | `/api/keys?service=X&pod=Y` | List registered cache keys (pod optional) |
+| `POST` | `/api/pod/get` | Get a cached value from a specific pod |
+| `POST` | `/api/refresh` | Clear cache entries across all pods of a service |
+| `POST` | `/api/registerKey` | Register a cache key (called by your app) |
+| `GET` | `/api/health` | Health check (`{ "redis": bool, "app": bool }`) |
 
-## App Contract
+## How It Works
 
-The app must expose these endpoints under `/internal/inMem/`:
+**Startup**: The sidecar calls your app's `/serverInfo` once to learn its service name and pod name. It then registers itself in Redis (`inmem:pod:<svc>:<pod>` with a 60s TTL) and subscribes to the service's pub/sub channel. A heartbeat refreshes the TTL every 30s. On `SIGTERM`, the key is deleted immediately; on crash, it auto-expires within 60s.
 
-| Method | Endpoint | Purpose |
-|--------|----------|---------|
-| `GET` | `/internal/inMem/serverInfo` | Returns `{ "serviceName": "...", "podName": "..." }` |
-| `POST` | `/internal/inMem/get` | Returns `{ "found": bool, "value": json }` for a given key |
-| `POST` | `/internal/inMem/refresh` | Deletes cached entries by prefix (or all) |
+**Getting a value**: When the dashboard (or any client) asks for a key from a specific pod, the sidecar looks up the target pod's URL from Redis and proxies the request directly. If direct HTTP fails (network policy, pod restarting), it falls back to a Redis pub/sub RPC — publishes a request to the target pod's channel and waits for a reply on an ephemeral channel.
 
-The sidecar calls `/serverInfo` once at startup to learn its identity. `/get` and `/refresh` are called on demand.
+**Refreshing / clearing cache**: A refresh request publishes a message to the service's broadcast channel in Redis. Every sidecar subscribed to that channel receives it and forwards the clear command to its local app. The originating pod skips the broadcast (it already cleared locally). Retries up to 3 times with backoff if the app returns an error.
 
-If `INMEM_TOKEN` is set, every request to these endpoints includes the `x-inmem-token` header. The app can use this to verify that requests are coming from a trusted sidecar.
+**Key registration**: When your app calls `/api/registerKey`, the sidecar writes the key metadata to a Redis hash (`inmem:keys:<svc>:<pod>`, 3-day TTL). The dashboard reads these hashes to show what's cached where. This is the only way keys appear in the dashboard — if you don't register, the sidecar still works for get/refresh, you just lose visibility.
 
-## Pod Liveness
+**Nothing piles up in Redis.** Pub/Sub messages are fire-and-forget — delivered to active subscribers and immediately discarded. The only persistent keys are pod liveness (60s TTL) and key registrations (3-day TTL), both self-cleaning.
 
-Each sidecar registers itself in Redis with a 60s TTL and refreshes every 30s. On graceful shutdown (`SIGTERM`), it deletes its key immediately. On crash, the key auto-expires within 60s. If the key exists, the pod is alive — no filtering logic needed.
+## Use Cases
 
-## Redis Keys
+**"A config changed in the DB, clear it from all pods"**
+You updated a pricing config in the database, but 12 pods still have the old value in memory. Instead of restarting the deployment, hit the dashboard's Clear button (or call `/api/refresh`) and every pod drops the stale entry. Next request fetches fresh from DB.
 
-| Key Pattern | Type | TTL | Purpose |
-|-------------|------|-----|---------|
-| `inmem:pod:<svc>:<pod>` | STRING | 60s | Pod liveness + sidecar URL |
-| `inmem:keys:<svc>:<pod>` | HASH | 3 days | Registered cache keys |
-| `inmem:<svc>` | PUBSUB | — | Broadcast channel (refresh) |
-| `inmem:req:<svc>:<pod>` | PUBSUB | — | Targeted request channel (get) |
-| `inmem:reply:<pod>:<nonce>` | PUBSUB | — | Ephemeral reply channel for pub/sub RPC |
+**"Why is this user seeing stale data?"**
+A customer reports seeing outdated information. Open the dashboard, find the service, pick the user's pod, and click Get on the relevant cache key to see exactly what's in memory on that pod right now. No port-forwarding, no kubectl exec, no guesswork.
+
+**"We need cache visibility across 5 microservices"**
+Each team owns their own service with their own in-memory cache. Deploy Shudhi as a sidecar to each, point them at the same Redis, and the dashboard shows all services, all pods, all cached keys in one place. Platform team gets visibility without each service team building custom tooling.
+
+**"Rolling out a feature flag change"**
+Feature flags cached in memory across pods. Instead of waiting for TTL expiry (could be hours), trigger a targeted refresh for the flag's cache key and every pod picks up the new value within seconds.
+
+**"Debugging cache inconsistency between pods"**
+Pod A returns one value, Pod B returns another for the same key. Use the dashboard to Get the value from each pod side by side and see exactly what diverged — no need to reproduce the issue or add temporary logging.

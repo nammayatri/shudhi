@@ -49,19 +49,21 @@ type AppInfo struct {
 }
 
 type Sidecar struct {
-	Config  Config
-	Redis   *redis.Client
-	AppInfo AppInfo
-	HTTP    *http.Client
-	ready   atomic.Bool // true once app info is fetched and registered
+	Config    Config
+	Redis     *redis.Client
+	AppInfo   AppInfo
+	HTTP      *http.Client
+	ProxyHTTP *http.Client // shorter timeout for sidecar-to-sidecar calls
+	ready     atomic.Bool  // true once app info is fetched and registered
 }
 
 func NewSidecar(cfg Config) *Sidecar {
 	rdb := redis.NewClient(&redis.Options{Addr: cfg.RedisURL, DB: cfg.RedisDB})
 	return &Sidecar{
-		Config: cfg,
-		Redis:  rdb,
-		HTTP:   &http.Client{Timeout: 5 * time.Second},
+		Config:    cfg,
+		Redis:     rdb,
+		HTTP:      &http.Client{Timeout: 5 * time.Second},
+		ProxyHTTP: &http.Client{Timeout: 2 * time.Second},
 	}
 }
 
