@@ -7,193 +7,362 @@
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     :root {
-      --bg: #0f1117;
-      --surface: #1a1d27;
-      --border: #2a2d3a;
-      --text: #e1e4ed;
-      --muted: #8b8fa3;
-      --accent: #6c7ee1;
-      --accent-hover: #8190e8;
-      --green: #4ade80;
-      --red: #f87171;
-      --yellow: #facc15;
+      --bg: #0a0b0f;
+      --bg-subtle: #0f1117;
+      --surface: #151821;
+      --surface-hover: #1c2030;
+      --surface-active: #1e2238;
+      --border: #1e2235;
+      --border-light: #282d42;
+      --text: #e4e7f1;
+      --text-secondary: #b0b4c8;
+      --muted: #6b7194;
+      --accent: #7c8cf5;
+      --accent-hover: #939ff8;
+      --accent-glow: rgba(124,140,245,0.12);
+      --accent-dim: rgba(124,140,245,0.08);
+      --green: #34d399;
+      --green-dim: rgba(52,211,153,0.1);
+      --red: #f47272;
+      --red-dim: rgba(244,114,114,0.1);
+      --yellow: #fbbf24;
+      --radius: 8px;
+      --radius-lg: 12px;
     }
+
     body {
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
       background: var(--bg);
       color: var(--text);
       min-height: 100vh;
+      -webkit-font-smoothing: antialiased;
     }
+
+    /* Scrollbar */
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: var(--border-light); }
+
+    /* Header */
     header {
+      background: var(--bg-subtle);
       border-bottom: 1px solid var(--border);
-      padding: 16px 24px;
+      padding: 0 24px;
+      height: 56px;
       display: flex;
       align-items: center;
       justify-content: space-between;
+      backdrop-filter: blur(12px);
+      position: sticky;
+      top: 0;
+      z-index: 50;
     }
-    header h1 { font-size: 18px; font-weight: 600; }
-    header h1 span { color: var(--muted); font-weight: 400; margin-left: 8px; font-size: 13px; }
+    .logo {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .logo-icon {
+      width: 28px;
+      height: 28px;
+      background: linear-gradient(135deg, var(--accent), #a78bfa);
+      border-radius: 7px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 14px;
+      font-weight: 700;
+      color: #fff;
+      letter-spacing: -0.5px;
+    }
+    .logo h1 {
+      font-size: 16px;
+      font-weight: 600;
+      letter-spacing: -0.3px;
+    }
+    .logo h1 span {
+      color: var(--muted);
+      font-weight: 400;
+      margin-left: 6px;
+      font-size: 12px;
+    }
+
     .config-bar {
       display: flex;
       align-items: center;
       gap: 8px;
     }
-    .config-bar label { font-size: 12px; color: var(--muted); }
+    .config-bar label {
+      font-size: 11px;
+      color: var(--muted);
+      font-weight: 500;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
     .config-bar input {
       background: var(--bg);
       border: 1px solid var(--border);
       color: var(--text);
-      padding: 6px 10px;
-      border-radius: 6px;
+      padding: 7px 12px;
+      border-radius: var(--radius);
       font-size: 13px;
-      width: 280px;
+      width: 260px;
+      outline: none;
+      transition: border-color 0.15s;
     }
+    .config-bar input:focus { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-glow); }
     .config-bar button {
-      background: var(--accent);
+      background: linear-gradient(135deg, var(--accent), #6a7bf0);
       color: #fff;
       border: none;
-      padding: 6px 14px;
-      border-radius: 6px;
+      padding: 7px 16px;
+      border-radius: var(--radius);
       cursor: pointer;
-      font-size: 13px;
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+      transition: opacity 0.15s, transform 0.1s;
     }
-    .config-bar button:hover { background: var(--accent-hover); }
+    .config-bar button:hover { opacity: 0.9; }
+    .config-bar button:active { transform: scale(0.97); }
 
+    /* Status dot */
+    .status-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: var(--muted);
+      margin-left: 4px;
+      transition: background 0.3s;
+    }
+    .status-dot.connected { background: var(--green); box-shadow: 0 0 6px var(--green); }
+
+    /* Layout */
     .layout {
       display: grid;
-      grid-template-columns: 220px 280px 1fr;
-      height: calc(100vh - 57px);
+      grid-template-columns: 230px 280px 1fr;
+      height: calc(100vh - 56px);
     }
+
+    /* Panels */
     .panel {
       border-right: 1px solid var(--border);
       overflow-y: auto;
+      background: var(--bg-subtle);
     }
-    .panel:last-child { border-right: none; }
+    .panel:last-child { border-right: none; background: var(--bg); }
     .panel-header {
-      padding: 12px 16px;
-      font-size: 11px;
-      font-weight: 600;
+      padding: 14px 16px;
+      font-size: 10px;
+      font-weight: 700;
       text-transform: uppercase;
-      letter-spacing: 0.05em;
+      letter-spacing: 0.08em;
       color: var(--muted);
       border-bottom: 1px solid var(--border);
       position: sticky;
       top: 0;
-      background: var(--bg);
+      background: var(--bg-subtle);
+      z-index: 10;
       display: flex;
       align-items: center;
       justify-content: space-between;
     }
     .panel-header .count {
-      background: var(--surface);
-      padding: 2px 7px;
+      background: var(--accent-dim);
+      color: var(--accent);
+      padding: 2px 8px;
       border-radius: 10px;
-      font-size: 11px;
+      font-size: 10px;
+      font-weight: 600;
     }
+
+    /* List items */
     .list-item {
-      padding: 10px 16px;
+      padding: 11px 16px;
       cursor: pointer;
       font-size: 13px;
       border-bottom: 1px solid var(--border);
-      transition: background 0.1s;
+      transition: all 0.12s;
+      border-left: 2px solid transparent;
     }
-    .list-item:hover { background: var(--surface); }
-    .list-item.active { background: var(--surface); border-left: 2px solid var(--accent); }
-    .list-item .sub { font-size: 11px; color: var(--muted); margin-top: 2px; }
+    .list-item:hover { background: var(--surface-hover); }
+    .list-item.active {
+      background: var(--surface-active);
+      border-left-color: var(--accent);
+    }
+    .list-item .sub {
+      font-size: 11px;
+      color: var(--muted);
+      margin-top: 3px;
+      font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+      font-size: 10px;
+    }
+    .list-item .svc-icon {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 22px;
+      height: 22px;
+      border-radius: 5px;
+      background: var(--accent-dim);
+      color: var(--accent);
+      font-size: 10px;
+      font-weight: 700;
+      margin-right: 8px;
+      vertical-align: middle;
+    }
+    .list-item .pod-dot {
+      display: inline-block;
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: var(--green);
+      margin-right: 8px;
+      box-shadow: 0 0 4px var(--green);
+    }
 
+    /* Detail panel */
     .detail {
-      padding: 20px 24px;
+      padding: 24px 28px;
       overflow-y: auto;
     }
-    .detail h2 { font-size: 15px; margin-bottom: 16px; }
-
-    .tabs {
-      display: flex;
-      gap: 0;
-      border-bottom: 1px solid var(--border);
-      margin-bottom: 16px;
+    .detail h2 {
+      font-size: 14px;
+      font-weight: 600;
+      margin-bottom: 18px;
+      color: var(--text-secondary);
+      letter-spacing: -0.2px;
     }
-    .tab {
-      padding: 8px 16px;
-      font-size: 13px;
-      cursor: pointer;
-      color: var(--muted);
-      border-bottom: 2px solid transparent;
-      transition: all 0.15s;
-    }
-    .tab:hover { color: var(--text); }
-    .tab.active { color: var(--accent); border-bottom-color: var(--accent); }
 
+    /* Toolbar */
     .keys-toolbar {
       display: flex;
       gap: 8px;
-      margin-bottom: 12px;
+      margin-bottom: 16px;
+      align-items: center;
     }
     .keys-toolbar input {
       flex: 1;
       background: var(--surface);
       border: 1px solid var(--border);
       color: var(--text);
-      padding: 8px 12px;
-      border-radius: 6px;
+      padding: 9px 14px;
+      border-radius: var(--radius);
       font-size: 13px;
+      outline: none;
+      transition: border-color 0.15s;
     }
+    .keys-toolbar input:focus { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-glow); }
+    .keys-toolbar input::placeholder { color: var(--muted); }
+
+    .clear-status {
+      font-size: 11px;
+      color: var(--green);
+      font-weight: 500;
+      animation: fadeIn 0.25s;
+    }
+
+    /* Buttons */
     .btn {
       background: var(--surface);
-      color: var(--text);
+      color: var(--text-secondary);
       border: 1px solid var(--border);
-      padding: 8px 14px;
-      border-radius: 6px;
+      padding: 7px 14px;
+      border-radius: var(--radius);
       cursor: pointer;
-      font-size: 13px;
+      font-size: 12px;
+      font-weight: 500;
       white-space: nowrap;
+      transition: all 0.12s;
     }
-    .btn:hover { border-color: var(--accent); }
-    .btn.danger { border-color: var(--red); color: var(--red); }
-    .btn.danger:hover { background: var(--red); color: #fff; }
-    .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+    .btn:hover { border-color: var(--border-light); background: var(--surface-hover); color: var(--text); }
+    .btn.danger { border-color: rgba(244,114,114,0.25); color: var(--red); }
+    .btn.danger:hover { background: var(--red-dim); border-color: var(--red); }
+    .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+    .btn.primary:hover { background: var(--accent-hover); }
+    .btn:active { transform: scale(0.97); }
 
+    .btn-sm {
+      padding: 4px 10px;
+      font-size: 11px;
+      border-radius: 6px;
+    }
+
+    /* Table */
     table {
       width: 100%;
-      border-collapse: collapse;
+      border-collapse: separate;
+      border-spacing: 0;
       font-size: 13px;
     }
+    thead { position: sticky; top: 0; }
     th {
       text-align: left;
-      padding: 8px 12px;
-      font-size: 11px;
-      font-weight: 600;
+      padding: 10px 14px;
+      font-size: 10px;
+      font-weight: 700;
       text-transform: uppercase;
-      letter-spacing: 0.05em;
+      letter-spacing: 0.06em;
       color: var(--muted);
+      background: var(--bg-subtle);
       border-bottom: 1px solid var(--border);
     }
     td {
-      padding: 8px 12px;
+      padding: 10px 14px;
       border-bottom: 1px solid var(--border);
       max-width: 300px;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
     }
-    tr:hover td { background: var(--surface); }
-    tr { cursor: pointer; }
+    tbody tr {
+      cursor: pointer;
+      transition: background 0.1s;
+    }
+    tbody tr:hover td { background: var(--surface); }
+    td .key-text {
+      font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+      font-size: 12px;
+      color: var(--text-secondary);
+    }
+    td .ttl-badge {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      padding: 2px 8px;
+      border-radius: 10px;
+      font-size: 10px;
+      color: var(--text-secondary);
+      font-weight: 500;
+    }
+    td .time-text {
+      color: var(--muted);
+      font-size: 12px;
+    }
+    td .actions-cell {
+      display: flex;
+      gap: 4px;
+      justify-content: flex-end;
+    }
 
+    /* Badge */
     .badge {
       display: inline-block;
       padding: 2px 8px;
       border-radius: 10px;
-      font-size: 11px;
-      font-weight: 500;
+      font-size: 10px;
+      font-weight: 600;
     }
-    .badge.green { background: rgba(74,222,128,0.15); color: var(--green); }
-    .badge.red { background: rgba(248,113,113,0.15); color: var(--red); }
+    .badge.green { background: var(--green-dim); color: var(--green); }
+    .badge.red { background: var(--red-dim); color: var(--red); }
 
+    /* Modal */
     .modal-overlay {
       display: none;
       position: fixed;
       inset: 0;
-      background: rgba(0,0,0,0.6);
+      background: rgba(0,0,0,0.7);
+      backdrop-filter: blur(4px);
       z-index: 100;
       align-items: center;
       justify-content: center;
@@ -201,68 +370,147 @@
     .modal-overlay.open { display: flex; }
     .modal {
       background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      padding: 24px;
-      width: 560px;
+      border: 1px solid var(--border-light);
+      border-radius: var(--radius-lg);
+      padding: 0;
+      width: 580px;
       max-height: 80vh;
-      overflow-y: auto;
+      overflow: hidden;
+      box-shadow: 0 24px 48px rgba(0,0,0,0.4);
+      animation: modalIn 0.2s ease-out;
     }
-    .modal h3 { font-size: 15px; margin-bottom: 16px; }
+    @keyframes modalIn {
+      from { opacity: 0; transform: scale(0.96) translateY(8px); }
+      to { opacity: 1; transform: scale(1) translateY(0); }
+    }
+    .modal-header {
+      padding: 18px 24px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .modal-header h3 { font-size: 14px; font-weight: 600; }
+    .modal-close {
+      background: none;
+      border: none;
+      color: var(--muted);
+      cursor: pointer;
+      font-size: 18px;
+      line-height: 1;
+      padding: 4px;
+      border-radius: 4px;
+      transition: all 0.12s;
+    }
+    .modal-close:hover { background: var(--surface-hover); color: var(--text); }
+    .modal-body {
+      padding: 20px 24px;
+      overflow-y: auto;
+      max-height: calc(80vh - 60px);
+    }
+    .modal-field { margin-bottom: 16px; }
+    .modal-field:last-child { margin-bottom: 0; }
+    .key-label {
+      font-size: 10px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--muted);
+      margin-bottom: 6px;
+    }
+    .key-name {
+      font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+      font-size: 12px;
+      color: var(--text-secondary);
+      word-break: break-all;
+      background: var(--bg);
+      padding: 8px 12px;
+      border-radius: 6px;
+      border: 1px solid var(--border);
+    }
     .modal pre {
       background: var(--bg);
       border: 1px solid var(--border);
-      border-radius: 8px;
+      border-radius: var(--radius);
       padding: 16px;
       font-size: 12px;
-      font-family: 'SF Mono', 'Fira Code', monospace;
+      font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
       overflow-x: auto;
       white-space: pre-wrap;
       word-break: break-all;
-      margin-bottom: 16px;
+      color: var(--text-secondary);
+      line-height: 1.6;
+      max-height: 320px;
+      overflow-y: auto;
     }
-    .modal .actions { display: flex; justify-content: flex-end; gap: 8px; }
-    .key-label {
-      font-size: 11px;
-      color: var(--muted);
-      margin-bottom: 4px;
-    }
-    .key-name {
-      font-family: 'SF Mono', 'Fira Code', monospace;
-      font-size: 13px;
-      margin-bottom: 12px;
-      word-break: break-all;
-    }
+
+    /* Toast */
     .toast {
       position: fixed;
       bottom: 20px;
       right: 20px;
       background: var(--surface);
       border: 1px solid var(--border);
-      padding: 10px 16px;
-      border-radius: 8px;
+      padding: 10px 18px;
+      border-radius: var(--radius);
       font-size: 13px;
+      font-weight: 500;
       z-index: 200;
-      animation: fadeIn 0.2s;
+      animation: toastIn 0.25s ease-out;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.3);
+      display: flex;
+      align-items: center;
+      gap: 8px;
     }
-    .toast.error { border-color: var(--red); }
-    .toast.success { border-color: var(--green); }
-    @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+    .toast::before {
+      content: '';
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .toast.error { border-color: rgba(244,114,114,0.3); }
+    .toast.error::before { background: var(--red); box-shadow: 0 0 6px var(--red); }
+    .toast.success { border-color: rgba(52,211,153,0.3); }
+    .toast.success::before { background: var(--green); box-shadow: 0 0 6px var(--green); }
+    @keyframes toastIn {
+      from { opacity: 0; transform: translateY(12px) scale(0.95); }
+      to { opacity: 1; transform: translateY(0) scale(1); }
+    }
 
+    /* Empty states */
     .empty {
       color: var(--muted);
       font-size: 13px;
-      padding: 24px 16px;
+      padding: 40px 16px;
       text-align: center;
+      line-height: 1.6;
+    }
+    .empty-icon {
+      font-size: 28px;
+      margin-bottom: 8px;
+      opacity: 0.4;
     }
     .loading { color: var(--muted); font-size: 13px; padding: 16px; }
+
+    /* Focus ring */
+    input:focus-visible, button:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 1px;
+    }
   </style>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 </head>
 <body>
   <header>
-    <h1>Shudhi <span>Cache Dashboard</span></h1>
+    <div class="logo">
+      <div class="logo-icon">S</div>
+      <h1>Shudhi <span>Cache Dashboard</span></h1>
+      <div class="status-dot" id="statusDot"></div>
+    </div>
     <div class="config-bar">
-      <label>API Base</label>
+      <label>API</label>
       <input id="sidecarUrl" value="" placeholder="leave empty for same-origin proxy">
       <button onclick="init()">Connect</button>
     </div>
@@ -272,51 +520,74 @@
     <!-- Services panel -->
     <div class="panel" id="servicesPanel">
       <div class="panel-header">Services <span class="count" id="svcCount">0</span></div>
-      <div id="servicesList"></div>
+      <div id="servicesList">
+        <div class="empty">
+          <div class="empty-icon">&#9781;</div>
+          Connecting...
+        </div>
+      </div>
     </div>
 
     <!-- Pods panel -->
     <div class="panel" id="podsPanel">
       <div class="panel-header">Pods <span class="count" id="podCount">0</span></div>
-      <div id="podsList"><div class="empty">Select a service</div></div>
+      <div id="podsList">
+        <div class="empty">
+          <div class="empty-icon">&#8862;</div>
+          Select a service
+        </div>
+      </div>
     </div>
 
     <!-- Detail panel -->
     <div class="panel detail" id="detailPanel">
-      <div class="empty">Select a service and pod to view cached keys</div>
+      <div class="empty">
+        <div class="empty-icon">&#9878;</div>
+        Select a service to view cached keys
+      </div>
     </div>
   </div>
 
   <!-- Value modal -->
   <div class="modal-overlay" id="valueModal">
     <div class="modal">
-      <h3>Cached Value</h3>
-      <div class="key-label">Key</div>
-      <div class="key-name" id="modalKeyName"></div>
-      <div class="key-label">Pod</div>
-      <div class="key-name" id="modalPodName"></div>
-      <div class="key-label">Value</div>
-      <pre id="modalValue"></pre>
-      <div class="actions">
-        <button class="btn" onclick="closeModal()">Close</button>
+      <div class="modal-header">
+        <h3>Cached Value</h3>
+        <button class="modal-close" onclick="closeModal()">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="modal-field">
+          <div class="key-label">Key</div>
+          <div class="key-name" id="modalKeyName"></div>
+        </div>
+        <div class="modal-field">
+          <div class="key-label">Pod</div>
+          <div class="key-name" id="modalPodName"></div>
+        </div>
+        <div class="modal-field">
+          <div class="key-label">Value</div>
+          <pre id="modalValue"></pre>
+        </div>
       </div>
     </div>
   </div>
 
   <script>
     let state = {
-      baseUrl: '',  // empty = same-origin (nginx proxies /api/ to sidecar)
+      baseUrl: '',
       services: [],
       selectedService: null,
       pods: [],
       selectedPod: null,
       keys: [],
       filter: '',
+      lastClear: null,
+      connected: false,
     };
 
     function getBaseUrl() {
       const v = document.getElementById('sidecarUrl').value.trim().replace(/\/+$/, '');
-      return v; // empty string = same origin
+      return v;
     }
 
     async function api(path, opts = {}) {
@@ -343,19 +614,24 @@
         state.selectedPod = null;
         state.pods = [];
         state.keys = [];
+        state.connected = true;
+        document.getElementById('statusDot').classList.add('connected');
         renderServices();
         renderPods();
         renderDetail();
         toast('Connected', 'success');
-      } catch (e) {}
+      } catch (e) {
+        state.connected = false;
+        document.getElementById('statusDot').classList.remove('connected');
+      }
     }
 
-    // auto-connect on load
     window.addEventListener('DOMContentLoaded', init);
 
     async function selectService(svc) {
       state.selectedService = svc;
       state.selectedPod = null;
+      state.lastClear = null;
       renderServices();
       try {
         const data = await api(`/api/pods?service=${encodeURIComponent(svc)}`);
@@ -367,6 +643,7 @@
 
     async function selectPod(podName) {
       state.selectedPod = podName;
+      state.lastClear = null;
       renderPods();
       await loadKeys();
     }
@@ -398,18 +675,37 @@
       } catch (e) {}
     }
 
-    async function refreshCache() {
+    async function clearKey(serviceName, keyName) {
+      const totalPods = state.pods.length || 1;
+      try {
+        await api('/api/refresh', {
+          method: 'POST',
+          body: JSON.stringify({
+            serviceName: serviceName,
+            keyInfix: keyName,
+          }),
+        });
+        state.lastClear = { keyName, totalPods };
+        renderKeysTable();
+        toast(`Cleared "${shortKey(keyName)}" across ${totalPods} pod${totalPods !== 1 ? 's' : ''}`, 'success');
+      } catch (e) {}
+    }
+
+    async function clearAllKeys() {
       if (!state.selectedService) return;
-      const prefix = document.getElementById('filterInput')?.value || null;
+      const totalPods = state.pods.length || 1;
+      const totalKeys = state.keys.length;
       try {
         await api('/api/refresh', {
           method: 'POST',
           body: JSON.stringify({
             serviceName: state.selectedService,
-            keyInfix: prefix || null,
+            keyInfix: null,
           }),
         });
-        toast(`Refresh published to ${state.selectedService}`, 'success');
+        state.lastClear = { keyName: null, totalPods, totalKeys };
+        renderKeysTable();
+        toast(`Cleared all ${totalKeys} key${totalKeys !== 1 ? 's' : ''} across ${totalPods} pod${totalPods !== 1 ? 's' : ''}`, 'success');
       } catch (e) {}
     }
 
@@ -423,12 +719,14 @@
       const el = document.getElementById('servicesList');
       document.getElementById('svcCount').textContent = state.services.length;
       if (!state.services.length) {
-        el.innerHTML = '<div class="empty">No services found</div>';
+        el.innerHTML = `<div class="empty"><div class="empty-icon">&#9781;</div>${state.connected ? 'No services found' : 'Connecting...'}</div>`;
         return;
       }
       el.innerHTML = state.services.map(svc =>
         `<div class="list-item ${svc === state.selectedService ? 'active' : ''}"
-              onclick="selectService('${esc(svc)}')">${esc(svc)}</div>`
+              onclick="selectService('${esc(svc)}')">
+          <span class="svc-icon">${esc(svc.charAt(0).toUpperCase())}</span>${esc(svc)}
+        </div>`
       ).join('');
     }
 
@@ -436,11 +734,11 @@
       const el = document.getElementById('podsList');
       document.getElementById('podCount').textContent = state.pods.length;
       if (!state.selectedService) {
-        el.innerHTML = '<div class="empty">Select a service</div>';
+        el.innerHTML = '<div class="empty"><div class="empty-icon">&#8862;</div>Select a service</div>';
         return;
       }
       if (!state.pods.length) {
-        el.innerHTML = '<div class="empty">No live pods</div>';
+        el.innerHTML = '<div class="empty"><div class="empty-icon">&#8862;</div>No live pods</div>';
         return;
       }
       let html = `<div class="list-item ${state.selectedPod === null ? 'active' : ''}"
@@ -448,7 +746,7 @@
       html += state.pods.map(p =>
         `<div class="list-item ${p.podName === state.selectedPod ? 'active' : ''}"
               onclick="selectPod('${esc(p.podName)}')">
-          <div>${esc(p.podName)}</div>
+          <div><span class="pod-dot"></span>${esc(p.podName)}</div>
           <div class="sub">${esc(p.sidecarUrl)}</div>
         </div>`
       ).join('');
@@ -458,20 +756,20 @@
     function renderDetail() {
       const el = document.getElementById('detailPanel');
       if (!state.selectedService) {
-        el.innerHTML = '<div class="empty">Select a service and pod to view cached keys</div>';
+        el.innerHTML = '<div class="empty"><div class="empty-icon">&#9878;</div>Select a service to view cached keys</div>';
         return;
       }
 
-      // If the skeleton (toolbar + table container) doesn't exist yet, create it
       if (!el.querySelector('.keys-toolbar')) {
         el.innerHTML = `
           <h2 id="detailTitle"></h2>
           <div class="keys-toolbar">
-            <input id="filterInput" placeholder="Filter keys..." value="">
-            <button class="btn danger" onclick="refreshCache()">Refresh Cache</button>
+            <input id="filterInput" placeholder="Search keys..." value="">
+            <button class="btn danger" onclick="clearAllKeys()">Clear All</button>
+            <span id="clearStatus" class="clear-status"></span>
           </div>
           <div id="keysTableContainer"></div>
-          <div id="keysCountLabel" style="margin-top:8px;color:var(--muted);font-size:12px"></div>
+          <div id="keysCountLabel" style="margin-top:10px;color:var(--muted);font-size:11px;font-weight:500"></div>
         `;
         document.getElementById('filterInput').addEventListener('input', function() {
           state.filter = this.value;
@@ -482,7 +780,6 @@
       document.getElementById('detailTitle').textContent =
         `Keys — ${state.selectedService} ${state.selectedPod ? '/ ' + state.selectedPod : '(all pods)'}`;
 
-      // sync filter input value (e.g. after loadKeys resets filter)
       const filterEl = document.getElementById('filterInput');
       if (filterEl !== document.activeElement) {
         filterEl.value = state.filter;
@@ -501,7 +798,7 @@
       );
 
       if (filtered.length === 0) {
-        container.innerHTML = '<div class="empty">No keys found</div>';
+        container.innerHTML = '<div class="empty"><div class="empty-icon">&#9898;</div>No keys found</div>';
       } else {
         container.innerHTML = `<table>
           <thead><tr>
@@ -509,19 +806,35 @@
             <th>Pod</th>
             <th>TTL</th>
             <th>Registered</th>
-            <th></th>
+            <th style="text-align:right">Actions</th>
           </tr></thead>
           <tbody>${filtered.map(k => `
             <tr onclick="getValue('${esc(state.selectedService)}', '${esc(k.podName)}', '${esc(k.keyName)}')">
-              <td title="${esc(k.keyName)}">${esc(k.keyName)}</td>
+              <td><span class="key-text" title="${esc(k.keyName)}">${esc(k.keyName)}</span></td>
               <td>${esc(shortPod(k.podName))}</td>
-              <td>${k.ttlInSeconds ? k.ttlInSeconds + 's' : '—'}</td>
-              <td>${k.registeredAt ? timeAgo(k.registeredAt) : '—'}</td>
-              <td><button class="btn" onclick="event.stopPropagation(); getValue('${esc(state.selectedService)}', '${esc(k.podName)}', '${esc(k.keyName)}')">Get</button></td>
+              <td>${k.ttlInSeconds ? `<span class="ttl-badge">${k.ttlInSeconds}s</span>` : '<span class="time-text">—</span>'}</td>
+              <td><span class="time-text">${k.registeredAt ? timeAgo(k.registeredAt) : '—'}</span></td>
+              <td>
+                <div class="actions-cell">
+                  <button class="btn btn-sm" onclick="event.stopPropagation(); getValue('${esc(state.selectedService)}', '${esc(k.podName)}', '${esc(k.keyName)}')">Get</button>
+                  <button class="btn btn-sm danger" onclick="event.stopPropagation(); clearKey('${esc(state.selectedService)}', '${esc(k.keyName)}')">Clear</button>
+                </div>
+              </td>
             </tr>`).join('')}
           </tbody>
         </table>`;
       }
+
+      const statusEl = document.getElementById('clearStatus');
+      if (statusEl && state.lastClear) {
+        const lc = state.lastClear;
+        if (lc.keyName) {
+          statusEl.textContent = `Cleared 1 / ${filtered.length} keys across ${lc.totalPods} pod${lc.totalPods !== 1 ? 's' : ''}`;
+        } else {
+          statusEl.textContent = `Cleared ${lc.totalKeys} / ${lc.totalKeys} keys across ${lc.totalPods} pod${lc.totalPods !== 1 ? 's' : ''}`;
+        }
+      }
+
       countLabel.textContent = `${filtered.length} key${filtered.length !== 1 ? 's' : ''}`;
     }
 
@@ -536,6 +849,11 @@
       if (!name) return '';
       const parts = name.split('-');
       return parts.length > 2 ? '...' + parts.slice(-2).join('-') : name;
+    }
+
+    function shortKey(name) {
+      if (!name) return '';
+      return name.length > 30 ? name.slice(0, 27) + '...' : name;
     }
 
     function timeAgo(iso) {
@@ -558,6 +876,10 @@
 
     document.getElementById('valueModal').addEventListener('click', e => {
       if (e.target === e.currentTarget) closeModal();
+    });
+
+    document.addEventListener('keydown', e => {
+      if (e.key === 'Escape') closeModal();
     });
   </script>
 </body>
