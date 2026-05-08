@@ -15,6 +15,13 @@ type PubSubMessage struct {
 	Payload   json.RawMessage `json:"payload"`
 	OriginPod string          `json:"originPod"`
 	Timestamp string          `json:"timestamp"`
+	ReplyTo   string          `json:"replyTo,omitempty"`
+}
+
+type RefreshAck struct {
+	PodName string `json:"podName"`
+	Success bool   `json:"success"`
+	Error   string `json:"error,omitempty"`
 }
 
 // SubscribePubSub subscribes to broadcast and targeted channels.
@@ -113,9 +120,23 @@ func (s *Sidecar) applyRefreshWithRetry(ctx context.Context, m PubSubMessage) {
 			continue
 		}
 		log.Printf("refresh from %s applied", m.OriginPod)
+		s.sendRefreshAck(ctx, m.ReplyTo, true, "")
 		return
 	}
 	log.Printf("pubsub refresh from %s failed after %d retries: %v", m.OriginPod, maxBroadcastRetries, lastErr)
+	s.sendRefreshAck(ctx, m.ReplyTo, false, lastErr.Error())
+}
+
+func (s *Sidecar) sendRefreshAck(ctx context.Context, replyTo string, success bool, errMsg string) {
+	if replyTo == "" {
+		return
+	}
+	ack, _ := json.Marshal(RefreshAck{
+		PodName: s.AppInfo.PodName,
+		Success: success,
+		Error:   errMsg,
+	})
+	s.Redis.Publish(ctx, replyTo, string(ack))
 }
 
 // PodRequest is a targeted request sent to a specific pod via pub/sub
@@ -181,12 +202,60 @@ func (s *Sidecar) pubsubGet(ctx context.Context, serviceName, podName, key strin
 }
 
 // publishRefresh publishes a refresh to any service's broadcast channel
-func (s *Sidecar) publishRefresh(ctx context.Context, serviceName string, appPayload []byte) error {
+func (s *Sidecar) publishRefresh(ctx context.Context, serviceName string, appPayload []byte, replyTo string) error {
 	msg, _ := json.Marshal(PubSubMessage{
 		Action:    "refresh",
 		Payload:   appPayload,
 		OriginPod: s.AppInfo.PodName,
 		Timestamp: time.Now().UTC().Format(time.RFC3339),
+		ReplyTo:   replyTo,
 	})
 	return s.Redis.Publish(ctx, pubsubChannel(serviceName), string(msg)).Err()
+}
+
+// publishRefreshAndCollectAcks publishes a refresh and waits for per-pod confirmations.
+func (s *Sidecar) publishRefreshAndCollectAcks(ctx context.Context, serviceName string, appPayload []byte, expectedPods int) ([]RefreshAck, error) {
+	replyTo := fmt.Sprintf("inmem:refresh-ack:%s:%d", s.AppInfo.PodName, time.Now().UnixNano())
+
+	// subscribe before publishing so we don't miss acks
+	sub := s.Redis.Subscribe(ctx, replyTo)
+	defer sub.Close()
+
+	if err := s.publishRefresh(ctx, serviceName, appPayload, replyTo); err != nil {
+		return nil, err
+	}
+
+	// the origin pod handles its own refresh locally, so we expect acks from (expectedPods - 1)
+	// if this sidecar isn't part of the target service, expect all pods
+	expectCount := expectedPods
+	if serviceName == s.AppInfo.ServiceName {
+		expectCount = expectedPods - 1
+	}
+	if expectCount <= 0 {
+		return nil, nil
+	}
+
+	timeoutCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	ch := sub.Channel()
+	var acks []RefreshAck
+	for {
+		select {
+		case <-timeoutCtx.Done():
+			return acks, nil
+		case msg, ok := <-ch:
+			if !ok {
+				return acks, nil
+			}
+			var ack RefreshAck
+			if err := json.Unmarshal([]byte(msg.Payload), &ack); err != nil {
+				continue
+			}
+			acks = append(acks, ack)
+			if len(acks) >= expectCount {
+				return acks, nil
+			}
+		}
+	}
 }

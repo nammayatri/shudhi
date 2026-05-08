@@ -256,13 +256,6 @@
     .keys-toolbar input:focus { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-glow); }
     .keys-toolbar input::placeholder { color: var(--muted); }
 
-    .clear-status {
-      font-size: 11px;
-      color: var(--green);
-      font-weight: 500;
-      animation: fadeIn 0.25s;
-    }
-
     /* Buttons */
     .btn {
       background: var(--surface);
@@ -493,6 +486,77 @@
     }
     .loading { color: var(--muted); font-size: 13px; padding: 16px; }
 
+    /* Refresh result panel */
+    .refresh-result {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 14px 16px;
+      margin-top: 12px;
+      animation: fadeIn 0.25s;
+    }
+    .refresh-result-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 10px;
+    }
+    .refresh-result-header .title {
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--text-secondary);
+    }
+    .refresh-result-header .summary {
+      font-size: 11px;
+      font-weight: 600;
+    }
+    .refresh-result-header .summary.all-ok { color: var(--green); }
+    .refresh-result-header .summary.partial { color: var(--yellow); }
+    .refresh-result-header .summary.all-fail { color: var(--red); }
+    .pod-ack-list {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .pod-ack {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 10px;
+      border-radius: 6px;
+      font-size: 12px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+    }
+    .pod-ack .dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .pod-ack.ok .dot { background: var(--green); box-shadow: 0 0 4px var(--green); }
+    .pod-ack.fail .dot { background: var(--red); box-shadow: 0 0 4px var(--red); }
+    .pod-ack .pod-ack-name {
+      font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+      font-size: 11px;
+      color: var(--text-secondary);
+      flex: 1;
+    }
+    .pod-ack .pod-ack-status {
+      font-size: 10px;
+      font-weight: 600;
+    }
+    .pod-ack.ok .pod-ack-status { color: var(--green); }
+    .pod-ack.fail .pod-ack-status { color: var(--red); }
+    .pod-ack .pod-ack-error {
+      font-size: 10px;
+      color: var(--muted);
+      max-width: 200px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
     /* Focus ring */
     input:focus-visible, button:focus-visible {
       outline: 2px solid var(--accent);
@@ -676,36 +740,37 @@
     }
 
     async function clearKey(serviceName, keyName) {
-      const totalPods = state.pods.length || 1;
       try {
-        await api('/api/refresh', {
+        const data = await api('/api/refresh', {
           method: 'POST',
           body: JSON.stringify({
             serviceName: serviceName,
             keyInfix: keyName,
           }),
         });
-        state.lastClear = { keyName, totalPods };
+        state.lastClear = { keyName, result: data };
         renderKeysTable();
-        toast(`Cleared "${shortKey(keyName)}" across ${totalPods} pod${totalPods !== 1 ? 's' : ''}`, 'success');
+        const ok = data.confirmed || 0;
+        const total = data.total || 0;
+        toast(`Cleared "${shortKey(keyName)}" — ${ok}/${total} pods confirmed`, ok === total ? 'success' : 'error');
       } catch (e) {}
     }
 
     async function clearAllKeys() {
       if (!state.selectedService) return;
-      const totalPods = state.pods.length || 1;
-      const totalKeys = state.keys.length;
       try {
-        await api('/api/refresh', {
+        const data = await api('/api/refresh', {
           method: 'POST',
           body: JSON.stringify({
             serviceName: state.selectedService,
             keyInfix: null,
           }),
         });
-        state.lastClear = { keyName: null, totalPods, totalKeys };
+        state.lastClear = { keyName: null, result: data };
         renderKeysTable();
-        toast(`Cleared all ${totalKeys} key${totalKeys !== 1 ? 's' : ''} across ${totalPods} pod${totalPods !== 1 ? 's' : ''}`, 'success');
+        const ok = data.confirmed || 0;
+        const total = data.total || 0;
+        toast(`Cleared all keys — ${ok}/${total} pods confirmed`, ok === total ? 'success' : 'error');
       } catch (e) {}
     }
 
@@ -766,9 +831,9 @@
           <div class="keys-toolbar">
             <input id="filterInput" placeholder="Search keys..." value="">
             <button class="btn danger" onclick="clearAllKeys()">Clear All</button>
-            <span id="clearStatus" class="clear-status"></span>
           </div>
           <div id="keysTableContainer"></div>
+          <div id="refreshResultContainer"></div>
           <div id="keysCountLabel" style="margin-top:10px;color:var(--muted);font-size:11px;font-weight:500"></div>
         `;
         document.getElementById('filterInput').addEventListener('input', function() {
@@ -825,17 +890,54 @@
         </table>`;
       }
 
-      const statusEl = document.getElementById('clearStatus');
-      if (statusEl && state.lastClear) {
-        const lc = state.lastClear;
-        if (lc.keyName) {
-          statusEl.textContent = `Cleared 1 / ${filtered.length} keys across ${lc.totalPods} pod${lc.totalPods !== 1 ? 's' : ''}`;
-        } else {
-          statusEl.textContent = `Cleared ${lc.totalKeys} / ${lc.totalKeys} keys across ${lc.totalPods} pod${lc.totalPods !== 1 ? 's' : ''}`;
-        }
-      }
+      renderRefreshResult();
 
       countLabel.textContent = `${filtered.length} key${filtered.length !== 1 ? 's' : ''}`;
+    }
+
+    function renderRefreshResult() {
+      const container = document.getElementById('refreshResultContainer');
+      if (!container) return;
+
+      if (!state.lastClear || !state.lastClear.result) {
+        container.innerHTML = '';
+        return;
+      }
+
+      const r = state.lastClear.result;
+      const pods = r.pods || [];
+      const confirmed = r.confirmed || 0;
+      const total = r.total || 0;
+      const keyLabel = state.lastClear.keyName
+        ? `Key: ${esc(shortKey(state.lastClear.keyName))}`
+        : 'All keys';
+
+      let summaryClass = 'all-ok';
+      let summaryText = `${confirmed}/${total} pods confirmed`;
+      if (confirmed === 0 && total > 0) {
+        summaryClass = 'all-fail';
+      } else if (confirmed < total) {
+        summaryClass = 'partial';
+      }
+
+      container.innerHTML = `
+        <div class="refresh-result">
+          <div class="refresh-result-header">
+            <span class="title">${keyLabel}</span>
+            <span class="summary ${summaryClass}">${summaryText}</span>
+          </div>
+          <div class="pod-ack-list">
+            ${pods.map(p => `
+              <div class="pod-ack ${p.success ? 'ok' : 'fail'}">
+                <span class="dot"></span>
+                <span class="pod-ack-name">${esc(p.podName)}</span>
+                <span class="pod-ack-status">${p.success ? 'cleared' : 'failed'}</span>
+                ${p.error ? `<span class="pod-ack-error" title="${esc(p.error)}">${esc(p.error)}</span>` : ''}
+              </div>
+            `).join('')}
+          </div>
+        </div>
+      `;
     }
 
     // --- Helpers ---

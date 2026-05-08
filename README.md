@@ -1,16 +1,32 @@
 # Shudhi
 
-A sidecar for managing in-memory caches across services. Deploy it alongside your app to get cache visibility, key lookups, and coordinated invalidation — all through Redis.
+See, inspect, and clear in-memory caches across all your services and pods — from one dashboard.
+
+Every microservice caches things in memory (local maps, Guava, Caffeine, etc). Once it's in memory, it's invisible — you can't see what's cached, you can't inspect values, and you can't clear a stale entry without restarting the pod. Multiply that by 10 services and 50 pods, and you're flying blind.
+
+Shudhi fixes this. Deploy it as a sidecar, implement 3 simple endpoints in your app, and you get:
+
+- **Visibility** — see every cached key across every pod, from one place
+- **Inspection** — read the actual cached value from any specific pod
+- **Invalidation** — clear a key (or all keys) across all pods of a service, instantly
 
 ```
-           Redis (shared)
-               │
-    ┌──────────┼──────────┐
-    │          │          │
- Sidecar A  Sidecar B  Sidecar C
-    │          │          │
- App Pod A  App Pod B  App Pod C
+    Your services with in-memory caches
+    ┌─────────┐  ┌─────────┐  ┌─────────┐
+    │ App A   │  │ App B   │  │ App C   │
+    │ (cache) │  │ (cache) │  │ (cache) │
+    └────┬────┘  └────┬────┘  └────┬────┘
+         │            │            │
+    ┌────┴────┐  ┌────┴────┐  ┌────┴────┐
+    │Sidecar A│  │Sidecar B│  │Sidecar C│    ← Shudhi sidecars
+    └────┬────┘  └────┬────┘  └────┬────┘
+         │            │            │
+         └────────────┼────────────┘
+                      │
+              Redis (coordination)
 ```
+
+Redis is used internally for sidecar coordination (discovery, message passing). Your app never talks to Redis — it only talks to its local sidecar over HTTP.
 
 ## Quick Start
 
@@ -22,13 +38,13 @@ APP_URL=http://localhost:8080 REDIS_URL=localhost:6379 go run .
 |---------|---------|-------------|
 | `APP_URL` | `http://localhost:8080` | Your app's base URL |
 | `SIDECAR_PORT` | `8900` | Sidecar listen port |
-| `REDIS_URL` | `localhost:6379` | Redis address |
+| `REDIS_URL` | `localhost:6379` | Redis address (for sidecar coordination) |
 | `POD_IP` | `127.0.0.1` | Pod IP (k8s downward API) |
 | `INMEM_TOKEN` | _(empty)_ | Shared auth token between sidecar and app |
 
 ## Integrating Your App
 
-Your app needs to expose 3 endpoints and make 1 optional call:
+Your app keeps its own in-memory cache as-is. No changes to your caching logic. You just expose 3 endpoints so the sidecar can talk to your cache, and optionally make 1 call to register keys for dashboard visibility.
 
 ### 1. Tell the sidecar who you are (required)
 
@@ -37,7 +53,7 @@ GET /internal/inMem/serverInfo
 → { "serviceName": "rider-app", "podName": "rider-app-7b4f8d6c9-x2k4m" }
 ```
 
-Called once at startup. The sidecar uses this to register itself in Redis.
+Called once at startup. The sidecar uses this to identify itself in the network.
 
 ### 2. Return a cached value on demand (required)
 
@@ -47,6 +63,8 @@ POST /internal/inMem/get
 → { "found": true, "value": { "vehicleType": "SUV" } }
 ```
 
+Look up the key in your in-memory cache and return the value.
+
 ### 3. Clear cache entries on demand (required)
 
 ```
@@ -55,11 +73,11 @@ POST /internal/inMem/refresh
 → 200 OK
 ```
 
-Delete any cached entries whose key contains the given `keyInfix`. If `null`, clear everything.
+Delete any in-memory entries whose key contains the given `keyInfix`. If `null`, clear your entire cache.
 
 ### 4. Register cached keys (optional, enables dashboard visibility)
 
-Whenever your app caches something, tell the sidecar:
+Whenever your app puts something in its in-memory cache, tell the sidecar:
 
 ```
 POST http://localhost:8900/api/registerKey
@@ -70,49 +88,51 @@ POST http://localhost:8900/api/registerKey
 }
 ```
 
-This makes the key visible in the dashboard. If the sidecar isn't ready yet, the call is silently accepted.
+This makes the key show up in the dashboard so you can browse and inspect it. Without this, get/refresh still work — you just won't see the key listed.
 
 > If `INMEM_TOKEN` is set, the sidecar sends it as `x-inmem-token` header on all calls to your app. Use it to verify requests come from a trusted sidecar.
 
 ## Sidecar API
 
-All endpoints work from any sidecar — the dashboard only needs to reach one.
+All endpoints work from any sidecar — the dashboard only needs to reach one to interact with any service's in-memory cache.
 
 | Method | Endpoint | What it does |
 |--------|----------|-------------|
-| `GET` | `/api/services` | List all services |
+| `GET` | `/api/services` | List all services with registered caches |
 | `GET` | `/api/pods?service=X` | List live pods for a service |
-| `GET` | `/api/keys?service=X&pod=Y` | List registered cache keys (pod optional) |
-| `POST` | `/api/pod/get` | Get a cached value from a specific pod |
+| `GET` | `/api/keys?service=X&pod=Y` | List cached keys (pod optional) |
+| `POST` | `/api/pod/get` | Read a cached value from a specific pod's memory |
 | `POST` | `/api/refresh` | Clear cache entries across all pods of a service |
 | `POST` | `/api/registerKey` | Register a cache key (called by your app) |
-| `GET` | `/api/health` | Health check (`{ "redis": bool, "app": bool }`) |
+| `GET` | `/api/health` | Health check |
 
 ## How It Works
 
-**Startup**: The sidecar calls your app's `/serverInfo` once to learn its service name and pod name. It then registers itself in Redis (`inmem:pod:<svc>:<pod>` with a 60s TTL) and subscribes to the service's pub/sub channel. A heartbeat refreshes the TTL every 30s. On `SIGTERM`, the key is deleted immediately; on crash, it auto-expires within 60s.
+**Your app's in-memory cache is the source of truth.** The sidecar never caches data itself — it's a thin coordination layer that lets you reach into any pod's memory from anywhere.
 
-**Getting a value**: When the dashboard (or any client) asks for a key from a specific pod, the sidecar looks up the target pod's URL from Redis and proxies the request directly. If direct HTTP fails (network policy, pod restarting), it falls back to a Redis pub/sub RPC — publishes a request to the target pod's channel and waits for a reply on an ephemeral channel.
+**Startup**: The sidecar calls your app's `/serverInfo` to learn its identity, then announces itself to other sidecars via Redis. A heartbeat keeps the registration alive (60s TTL, refreshed every 30s). On shutdown, it deregisters immediately.
 
-**Refreshing / clearing cache**: A refresh request publishes a message to the service's broadcast channel in Redis. Every sidecar subscribed to that channel receives it and forwards the clear command to its local app. The originating pod skips the broadcast (it already cleared locally). Retries up to 3 times with backoff if the app returns an error.
+**Inspecting a value**: When you click "Get" on a key in the dashboard, the sidecar routes the request to the correct pod — either via direct HTTP or via a pub/sub relay if the pod isn't directly reachable. The target pod's sidecar calls the app's `/get` endpoint, reads the value from the app's in-memory cache, and returns it.
 
-**Key registration**: When your app calls `/api/registerKey`, the sidecar writes the key metadata to a Redis hash (`inmem:keys:<svc>:<pod>`, 3-day TTL). The dashboard reads these hashes to show what's cached where. This is the only way keys appear in the dashboard — if you don't register, the sidecar still works for get/refresh, you just lose visibility.
+**Clearing cache**: When you clear a key, the sidecar broadcasts to all pods of that service. Each pod's sidecar receives the message and calls its local app's `/refresh` endpoint, which removes the entry from the app's in-memory cache. The stale data is gone from every pod within seconds.
 
-**Nothing piles up in Redis.** Pub/Sub messages are fire-and-forget — delivered to active subscribers and immediately discarded. The only persistent keys are pod liveness (60s TTL) and key registrations (3-day TTL), both self-cleaning.
+**Key registration**: When your app registers a key, the sidecar stores the metadata (key name, schema, TTL) so the dashboard can list it. This is just a registry for browsing — the actual cached data always lives in your app's memory.
+
+**Redis is only for coordination** — sidecar discovery, message routing, and key metadata. Pub/sub messages are fire-and-forget (never stored). The only persistent keys are pod liveness (60s TTL) and key metadata (3-day TTL), both self-cleaning. Nothing piles up.
 
 ## Use Cases
 
 **"A config changed in the DB, clear it from all pods"**
-You updated a pricing config in the database, but 12 pods still have the old value in memory. Instead of restarting the deployment, hit the dashboard's Clear button (or call `/api/refresh`) and every pod drops the stale entry. Next request fetches fresh from DB.
+You updated a pricing config, but 12 pods still serve the old value from their in-memory cache. Hit Clear in the dashboard and every pod drops the stale entry instantly. No restarts needed.
 
 **"Why is this user seeing stale data?"**
-A customer reports seeing outdated information. Open the dashboard, find the service, pick the user's pod, and click Get on the relevant cache key to see exactly what's in memory on that pod right now. No port-forwarding, no kubectl exec, no guesswork.
+Open the dashboard, find the service, pick the pod, click Get on the cache key. You're looking at the exact value sitting in that pod's memory right now. No port-forwarding, no kubectl exec.
 
 **"We need cache visibility across 5 microservices"**
-Each team owns their own service with their own in-memory cache. Deploy Shudhi as a sidecar to each, point them at the same Redis, and the dashboard shows all services, all pods, all cached keys in one place. Platform team gets visibility without each service team building custom tooling.
+Each team has their own service with their own in-memory caches. Deploy Shudhi as a sidecar to each, and the dashboard shows all services, all pods, all cached keys in one place.
 
 **"Rolling out a feature flag change"**
-Feature flags cached in memory across pods. Instead of waiting for TTL expiry (could be hours), trigger a targeted refresh for the flag's cache key and every pod picks up the new value within seconds.
+Feature flags are cached in memory. Instead of waiting for TTL expiry, clear the flag's cache key and every pod picks up the new value within seconds.
 
 **"Debugging cache inconsistency between pods"**
-Pod A returns one value, Pod B returns another for the same key. Use the dashboard to Get the value from each pod side by side and see exactly what diverged — no need to reproduce the issue or add temporary logging.
+Pod A returns one value, Pod B returns another. Use the dashboard to Get the value from each pod and see exactly what diverged — without reproducing the issue or adding temporary logging.

@@ -295,6 +295,12 @@ type RefreshReq struct {
 	KeyInfix   *string `json:"keyInfix"`
 }
 
+type PodAckResult struct {
+	PodName string `json:"podName"`
+	Success bool   `json:"success"`
+	Error   string `json:"error,omitempty"`
+}
+
 func (s *Sidecar) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	var req RefreshReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.ServiceName == "" {
@@ -305,42 +311,64 @@ func (s *Sidecar) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	appPayload, _ := json.Marshal(map[string]any{"keyInfix": req.KeyInfix})
 
-	var localErr error
-	// if this sidecar is part of the target service, also refresh locally
+	// get pod count for the target service so we know how many acks to expect
+	pods, _ := s.scanPods(ctx, req.ServiceName)
+	totalPods := len(pods)
+
+	// build per-pod results
+	var results []PodAckResult
+
+	// if this sidecar is part of the target service, refresh locally first
 	if req.ServiceName == s.AppInfo.ServiceName {
 		resp, err := s.doPost(ctx, s.Config.AppURL+"/internal/inMem/refresh", "application/json",
 			strings.NewReader(string(appPayload)))
 		if err != nil {
-			localErr = err
 			log.Printf("local refresh failed (will still broadcast): %v", err)
+			results = append(results, PodAckResult{PodName: s.AppInfo.PodName, Success: false, Error: err.Error()})
 		} else {
 			drainClose(resp)
+			results = append(results, PodAckResult{PodName: s.AppInfo.PodName, Success: true})
 		}
 	}
 
-	// always attempt broadcast even if local refresh failed —
-	// other pods still need to be refreshed
-	publishErr := s.publishRefresh(ctx, req.ServiceName, appPayload)
+	// broadcast and collect acks from other pods
+	acks, publishErr := s.publishRefreshAndCollectAcks(ctx, req.ServiceName, appPayload, totalPods)
 	if publishErr != nil {
 		log.Printf("publish refresh failed: %v", publishErr)
+		http.Error(w, fmt.Sprintf("publish failed: %v", publishErr), http.StatusInternalServerError)
+		return
 	}
 
-	// report combined status
-	if localErr != nil && publishErr != nil {
-		http.Error(w, fmt.Sprintf("local: %v, publish: %v", localErr, publishErr), http.StatusInternalServerError)
-		return
+	// merge acks into results
+	for _, ack := range acks {
+		results = append(results, PodAckResult{PodName: ack.PodName, Success: ack.Success, Error: ack.Error})
 	}
-	if publishErr != nil {
-		http.Error(w, fmt.Sprintf("local refreshed but broadcast failed: %v", publishErr), http.StatusInternalServerError)
-		return
+
+	// figure out which pods didn't respond
+	responded := map[string]bool{}
+	for _, r := range results {
+		responded[r.PodName] = true
+	}
+	for _, p := range pods {
+		if !responded[p.PodName] {
+			results = append(results, PodAckResult{PodName: p.PodName, Success: false, Error: "no response (timeout)"})
+		}
+	}
+
+	confirmed := 0
+	for _, r := range results {
+		if r.Success {
+			confirmed++
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	resp := map[string]any{"published": true, "service": req.ServiceName}
-	if localErr != nil {
-		resp["localError"] = localErr.Error()
-	}
-	json.NewEncoder(w).Encode(resp)
+	json.NewEncoder(w).Encode(map[string]any{
+		"service":   req.ServiceName,
+		"total":     totalPods,
+		"confirmed": confirmed,
+		"pods":      results,
+	})
 }
 
 // --- health ---
