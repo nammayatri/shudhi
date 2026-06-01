@@ -162,6 +162,9 @@ func (s *Sidecar) scanPods(ctx context.Context, svc string) ([]PodInfo, error) {
 }
 
 // --- keys: list registered keys ---
+// Optional "pattern" query parameter uses standard glob syntax (*, ?, [...]).
+// Backslash acts as an escape character, so keys containing backslashes may
+// need to be double-escaped in the pattern.
 
 func (s *Sidecar) handleKeys(w http.ResponseWriter, r *http.Request) {
 	svc := r.URL.Query().Get("service")
@@ -214,7 +217,9 @@ func (s *Sidecar) getKeysForPod(ctx context.Context, svc, pod, pattern string) (
 			}
 		}
 		var m map[string]any
-		json.Unmarshal([]byte(meta), &m)
+		if err := json.Unmarshal([]byte(meta), &m); err != nil {
+			continue
+		}
 		m["keyName"] = keyName
 		m["podName"] = pod
 		out = append(out, m)
