@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -168,13 +169,14 @@ func (s *Sidecar) handleKeys(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "service param required", http.StatusBadRequest)
 		return
 	}
-	pod := r.URL.Query().Get("pod") // optional
+	pod := r.URL.Query().Get("pod")         // optional
+	pattern := r.URL.Query().Get("pattern") // optional glob filter
 
 	ctx := r.Context()
 	var result []map[string]any
 
 	if pod != "" {
-		entries, err := s.getKeysForPod(ctx, svc, pod)
+		entries, err := s.getKeysForPod(ctx, svc, pod, pattern)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -187,7 +189,7 @@ func (s *Sidecar) handleKeys(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		for _, p := range pods {
-			entries, err := s.getKeysForPod(ctx, svc, p.PodName)
+			entries, err := s.getKeysForPod(ctx, svc, p.PodName, pattern)
 			if err != nil {
 				continue
 			}
@@ -197,7 +199,7 @@ func (s *Sidecar) handleKeys(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]any{"keys": result})
 }
 
-func (s *Sidecar) getKeysForPod(ctx context.Context, svc, pod string) ([]map[string]any, error) {
+func (s *Sidecar) getKeysForPod(ctx context.Context, svc, pod, pattern string) ([]map[string]any, error) {
 	hashKey := fmt.Sprintf("inmem:keys:%s:%s", svc, pod)
 	entries, err := s.Redis.HGetAll(ctx, hashKey).Result()
 	if err != nil {
@@ -205,6 +207,12 @@ func (s *Sidecar) getKeysForPod(ctx context.Context, svc, pod string) ([]map[str
 	}
 	var out []map[string]any
 	for keyName, meta := range entries {
+		if pattern != "" {
+			matched, err := filepath.Match(pattern, keyName)
+			if err != nil || !matched {
+				continue
+			}
+		}
 		var m map[string]any
 		json.Unmarshal([]byte(meta), &m)
 		m["keyName"] = keyName
