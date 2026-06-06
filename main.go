@@ -30,6 +30,7 @@ func main() {
 
 	<-ctx.Done()
 	log.Println("shutting down...")
+	s.cancelConnect()
 	if s.IsReady() {
 		s.Deregister(context.Background())
 	}

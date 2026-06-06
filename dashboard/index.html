@@ -647,7 +647,15 @@
       filter: '',
       lastClear: null,
       connected: false,
+      // Pagination (only when a pod is selected — live /inMem/keys)
+      totalKeys: null,
+      limit: 100,
+      offset: 0,
+      pattern: '',
+      source: null, // 'registry' or null (live)
     };
+
+    let _searchTimer = null;
 
     function getBaseUrl() {
       const v = document.getElementById('sidecarUrl').value.trim().replace(/\/+$/, '');
@@ -696,6 +704,9 @@
       state.selectedService = svc;
       state.selectedPod = null;
       state.lastClear = null;
+      state.offset = 0;
+      state.pattern = '';
+      state.filter = '';
       renderServices();
       try {
         const data = await api(`/api/pods?service=${encodeURIComponent(svc)}`);
@@ -708,6 +719,9 @@
     async function selectPod(podName) {
       state.selectedPod = podName;
       state.lastClear = null;
+      state.offset = 0;
+      state.pattern = '';
+      state.filter = '';
       renderPods();
       await loadKeys();
     }
@@ -715,13 +729,50 @@
     async function loadKeys() {
       if (!state.selectedService) return;
       let url = `/api/keys?service=${encodeURIComponent(state.selectedService)}`;
-      if (state.selectedPod) url += `&pod=${encodeURIComponent(state.selectedPod)}`;
+      if (state.selectedPod) {
+        url += `&pod=${encodeURIComponent(state.selectedPod)}`;
+        url += `&limit=${state.limit}&offset=${state.offset}`;
+        if (state.pattern) url += `&pattern=${encodeURIComponent(state.pattern)}`;
+      } else if (state.pattern) {
+        url += `&pattern=${encodeURIComponent(state.pattern)}`;
+      }
       try {
         const data = await api(url);
-        state.keys = data.keys || [];
-        state.filter = '';
+        // Live /inMem/keys returns {keyList, totalKeys}; registry returns {keys, source}
+        if (data.keyList !== undefined) {
+          state.keys = (data.keyList || []).map(k => ({
+            keyName: k.keyName,
+            keySchema: k.keySchema,
+            podName: state.selectedPod,
+          }));
+          state.totalKeys = data.totalKeys || 0;
+          state.source = 'live';
+        } else {
+          state.keys = data.keys || [];
+          state.totalKeys = null;
+          state.source = data.source || 'registry';
+        }
         renderDetail();
       } catch (e) {}
+    }
+
+    function onPatternSearch(value) {
+      state.pattern = value;
+      state.offset = 0;
+      clearTimeout(_searchTimer);
+      if (state.selectedPod) {
+        // Debounced server-side search
+        _searchTimer = setTimeout(() => loadKeys(), 300);
+      } else {
+        // Client-side filter for registry mode
+        state.filter = value;
+        renderKeysTable();
+      }
+    }
+
+    async function goToPage(newOffset) {
+      state.offset = Math.max(0, newOffset);
+      await loadKeys();
     }
 
     async function getValue(serviceName, podName, key) {
@@ -833,22 +884,26 @@
             <button class="btn danger" onclick="clearAllKeys()">Clear All</button>
           </div>
           <div id="keysTableContainer"></div>
+          <div id="paginationContainer"></div>
           <div id="refreshResultContainer"></div>
           <div id="keysCountLabel" style="margin-top:10px;color:var(--muted);font-size:11px;font-weight:500"></div>
         `;
         document.getElementById('filterInput').addEventListener('input', function() {
-          state.filter = this.value;
-          renderKeysTable();
+          onPatternSearch(this.value);
         });
       }
 
+      const sourceLabel = state.selectedPod
+        ? '/ ' + state.selectedPod + ' (live)'
+        : '(all pods — registry)';
       document.getElementById('detailTitle').textContent =
-        `Keys — ${state.selectedService} ${state.selectedPod ? '/ ' + state.selectedPod : '(all pods)'}`;
+        `Keys — ${state.selectedService} ${sourceLabel}`;
 
       const filterEl = document.getElementById('filterInput');
       if (filterEl !== document.activeElement) {
-        filterEl.value = state.filter;
+        filterEl.value = state.selectedPod ? state.pattern : state.filter;
       }
+      filterEl.placeholder = state.selectedPod ? 'Search keys (server-side)...' : 'Filter keys...';
 
       renderKeysTable();
     }
@@ -856,11 +911,15 @@
     function renderKeysTable() {
       const container = document.getElementById('keysTableContainer');
       const countLabel = document.getElementById('keysCountLabel');
+      const paginationContainer = document.getElementById('paginationContainer');
       if (!container) return;
 
-      const filtered = state.keys.filter(k =>
-        !state.filter || k.keyName.toLowerCase().includes(state.filter.toLowerCase())
-      );
+      // In registry mode, apply client-side filter; in live mode keys are already filtered server-side
+      const filtered = state.source === 'live'
+        ? state.keys
+        : state.keys.filter(k =>
+            !state.filter || k.keyName.toLowerCase().includes(state.filter.toLowerCase())
+          );
 
       if (filtered.length === 0) {
         container.innerHTML = '<div class="empty"><div class="empty-icon">&#9898;</div>No keys found</div>';
@@ -890,9 +949,33 @@
         </table>`;
       }
 
+      // Pagination controls (only in live mode with a selected pod)
+      if (paginationContainer) {
+        if (state.source === 'live' && state.totalKeys !== null) {
+          const totalPages = Math.ceil(state.totalKeys / state.limit);
+          const currentPage = Math.floor(state.offset / state.limit) + 1;
+          const hasPrev = state.offset > 0;
+          const hasNext = state.offset + state.limit < state.totalKeys;
+          paginationContainer.innerHTML = `
+            <div style="display:flex;align-items:center;gap:10px;margin-top:12px;">
+              <button class="btn btn-sm" ${hasPrev ? '' : 'disabled'} onclick="goToPage(${state.offset - state.limit})">Prev</button>
+              <span style="color:var(--text-secondary);font-size:12px;">
+                Page ${currentPage} of ${totalPages} &middot; ${state.totalKeys} total key${state.totalKeys !== 1 ? 's' : ''}
+              </span>
+              <button class="btn btn-sm" ${hasNext ? '' : 'disabled'} onclick="goToPage(${state.offset + state.limit})">Next</button>
+            </div>`;
+        } else {
+          paginationContainer.innerHTML = '';
+        }
+      }
+
       renderRefreshResult();
 
-      countLabel.textContent = `${filtered.length} key${filtered.length !== 1 ? 's' : ''}`;
+      if (state.source === 'live') {
+        countLabel.textContent = `Showing ${filtered.length} of ${state.totalKeys ?? '?'} keys (live from pod)`;
+      } else {
+        countLabel.textContent = `${filtered.length} key${filtered.length !== 1 ? 's' : ''} (from registry)`;
+      }
     }
 
     function renderRefreshResult() {

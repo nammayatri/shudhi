@@ -49,12 +49,14 @@ type AppInfo struct {
 }
 
 type Sidecar struct {
-	Config    Config
-	Redis     *redis.Client
-	AppInfo   AppInfo
-	HTTP      *http.Client
-	ProxyHTTP *http.Client // shorter timeout for sidecar-to-sidecar calls
-	ready     atomic.Bool  // true once app info is fetched and registered
+	Config        Config
+	Redis         *redis.Client
+	AppInfo       AppInfo
+	HTTP          *http.Client
+	ProxyHTTP     *http.Client       // shorter timeout for sidecar-to-sidecar calls
+	ready         atomic.Bool        // true once app info is fetched and registered
+	connectCancel context.CancelFunc // cancels heartbeat/pubsub goroutines on reconnect
+	reconnectCh   chan struct{}      // heartbeat signals here when it detects sustained failure
 }
 
 func NewSidecar(cfg Config) *Sidecar {
@@ -69,6 +71,7 @@ func NewSidecar(cfg Config) *Sidecar {
 
 // WaitForApp retries fetching app info until it succeeds or ctx is cancelled.
 // Once connected, registers in Redis and starts heartbeat + pubsub.
+// If heartbeat detects sustained Redis failure, it resets and reconnects.
 func (s *Sidecar) WaitForApp(ctx context.Context) {
 	for {
 		if err := s.tryConnect(ctx); err != nil {
@@ -80,7 +83,22 @@ func (s *Sidecar) WaitForApp(ctx context.Context) {
 				continue
 			}
 		}
-		return
+
+		// Block until heartbeat reports sustained failure
+		<-s.reconnectCh
+		if ctx.Err() != nil {
+			return
+		}
+
+		// Connection lost — reset and reconnect
+		log.Println("connection lost, will reconnect...")
+		s.ready.Store(false)
+		s.cancelConnect()
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(5 * time.Second):
+		}
 	}
 }
 
@@ -100,14 +118,45 @@ func (s *Sidecar) tryConnect(ctx context.Context) error {
 		return fmt.Errorf("register: %w", err)
 	}
 
+	connectCtx, cancel := context.WithCancel(ctx)
+	s.connectCancel = cancel
+	s.reconnectCh = make(chan struct{}, 1)
+
 	s.ready.Store(true)
-	go s.Heartbeat(ctx)
-	go s.SubscribePubSub(ctx)
+	go s.safeGo("heartbeat", func() {
+		if err := s.Heartbeat(connectCtx); err != nil {
+			log.Printf("heartbeat exited: %v", err)
+			select {
+			case s.reconnectCh <- struct{}{}:
+			default:
+			}
+		}
+	})
+	go s.safeGo("pubsub", func() { s.SubscribePubSub(connectCtx) })
 	return nil
+}
+
+// safeGo wraps a function with panic recovery so goroutine crashes don't kill the process.
+func (s *Sidecar) safeGo(name string, fn func()) func() {
+	return func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("PANIC in %s goroutine (recovered): %v", name, r)
+			}
+		}()
+		fn()
+	}
 }
 
 func (s *Sidecar) IsReady() bool {
 	return s.ready.Load()
+}
+
+func (s *Sidecar) cancelConnect() {
+	if s.connectCancel != nil {
+		s.connectCancel()
+		s.connectCancel = nil
+	}
 }
 
 func (s *Sidecar) fetchAppInfo(ctx context.Context) (AppInfo, error) {
