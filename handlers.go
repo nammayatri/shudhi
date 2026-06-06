@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -168,33 +169,109 @@ func (s *Sidecar) handleKeys(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "service param required", http.StatusBadRequest)
 		return
 	}
-	pod := r.URL.Query().Get("pod") // optional
+	pod := r.URL.Query().Get("pod")
+	pattern := r.URL.Query().Get("pattern")
+	limit := r.URL.Query().Get("limit")
+	offset := r.URL.Query().Get("offset")
 
 	ctx := r.Context()
-	var result []map[string]any
 
 	if pod != "" {
-		entries, err := s.getKeysForPod(ctx, svc, pod)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		result = entries
-	} else {
-		pods, err := s.scanPods(ctx, svc)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		for _, p := range pods {
-			entries, err := s.getKeysForPod(ctx, svc, p.PodName)
-			if err != nil {
-				continue
-			}
-			result = append(result, entries...)
-		}
+		// Live query: proxy to the pod's app /inMem/keys endpoint
+		s.proxyKeysToApp(ctx, w, r, svc, pod, pattern, limit, offset)
+		return
 	}
-	json.NewEncoder(w).Encode(map[string]any{"keys": result})
+
+	// No pod selected: aggregate from Redis hashes (registered keys)
+	var result []map[string]any
+	pods, err := s.scanPods(ctx, svc)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	for _, p := range pods {
+		entries, err := s.getKeysForPod(ctx, svc, p.PodName)
+		if err != nil {
+			continue
+		}
+		result = append(result, entries...)
+	}
+	// Client-side filter for pattern when aggregating from Redis
+	if pattern != "" {
+		var filtered []map[string]any
+		lp := strings.ToLower(pattern)
+		for _, entry := range result {
+			if name, ok := entry["keyName"].(string); ok && strings.Contains(strings.ToLower(name), lp) {
+				filtered = append(filtered, entry)
+			}
+		}
+		result = filtered
+	}
+	json.NewEncoder(w).Encode(map[string]any{"keys": result, "source": "registry"})
+}
+
+func (s *Sidecar) proxyKeysToApp(ctx context.Context, w http.ResponseWriter, r *http.Request, svc, pod, pattern, limit, offset string) {
+	// Build /inMem/keys query string for the app
+	q := url.Values{}
+	if pattern != "" {
+		q.Set("pattern", pattern)
+	}
+	if limit != "" {
+		q.Set("limit", limit)
+	}
+	if offset != "" {
+		q.Set("offset", offset)
+	}
+	targetPath := "/inMem/keys"
+	if len(q) > 0 {
+		targetPath += "?" + q.Encode()
+	}
+
+	// If it's this pod, call local app directly
+	if pod == s.AppInfo.PodName && svc == s.AppInfo.ServiceName {
+		resp, err := s.doGet(ctx, s.Config.AppURL+targetPath)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("app unreachable: %v", err), http.StatusBadGateway)
+			return
+		}
+		defer drainClose(resp)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(resp.StatusCode)
+		io.Copy(w, resp.Body)
+		return
+	}
+
+	// Prevent proxy loops
+	if r.Header.Get("X-Shudhi-Proxied") != "" {
+		http.Error(w, "proxy loop detected", http.StatusLoopDetected)
+		return
+	}
+
+	// Proxy to target pod's sidecar
+	podRedisKey := fmt.Sprintf("inmem:pod:%s:%s", svc, pod)
+	targetURL, err := s.Redis.Get(ctx, podRedisKey).Result()
+	if err != nil {
+		http.Error(w, "pod not found", http.StatusNotFound)
+		return
+	}
+
+	// Forward full /api/keys request to target sidecar (which will call its local app)
+	fwdQ := r.URL.Query()
+	fwdURL := targetURL + "/api/keys?" + fwdQ.Encode()
+	proxyReq, _ := http.NewRequestWithContext(ctx, "GET", fwdURL, nil)
+	proxyReq.Header.Set("X-Shudhi-Proxied", "true")
+	if s.Config.InMemToken != "" {
+		proxyReq.Header.Set("x-inmem-token", s.Config.InMemToken)
+	}
+	resp, err := s.ProxyHTTP.Do(proxyReq)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("sidecar unreachable: %v", err), http.StatusBadGateway)
+		return
+	}
+	defer drainClose(resp)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(resp.StatusCode)
+	io.Copy(w, resp.Body)
 }
 
 func (s *Sidecar) getKeysForPod(ctx context.Context, svc, pod string) ([]map[string]any, error) {
