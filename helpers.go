@@ -29,3 +29,13 @@ func copyJSON(w http.ResponseWriter, resp *http.Response) {
 	w.WriteHeader(resp.StatusCode)
 	io.Copy(w, resp.Body)
 }
+
+// isLocalPod reports whether svc/pod refers to this sidecar's own app instance.
+func (s *Sidecar) isLocalPod(svc, pod string) bool {
+	return pod == s.AppInfo.PodName && svc == s.AppInfo.ServiceName
+}
+
+// isProxied reports whether this request was already forwarded by another sidecar.
+func isProxied(r *http.Request) bool {
+	return r.Header.Get("X-Shudhi-Proxied") != ""
+}

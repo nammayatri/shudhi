@@ -64,7 +64,7 @@ func (s *Sidecar) scanServices(ctx context.Context) ([]string, error) {
 	var cursor uint64
 
 	for {
-		keys, next, err := s.Redis.Scan(ctx, cursor, "inmem:pod:*", 100).Result()
+		keys, next, err := s.Redis.Scan(ctx, cursor, podScanPattern, 100).Result()
 		if err != nil {
 			return nil, err
 		}
@@ -112,7 +112,7 @@ func (s *Sidecar) handlePods(w http.ResponseWriter, r *http.Request) {
 func (s *Sidecar) scanPods(ctx context.Context, svc string) ([]PodInfo, error) {
 	var pods []PodInfo
 	var cursor uint64
-	prefix := fmt.Sprintf("inmem:pod:%s:", svc)
+	prefix := podPrefixFor(svc)
 
 	for {
 		keys, next, err := s.Redis.Scan(ctx, cursor, prefix+"*", 100).Result()
@@ -208,7 +208,7 @@ func (s *Sidecar) proxyKeysToApp(ctx context.Context, w http.ResponseWriter, r *
 	}
 
 	// If it's this pod, call local app directly
-	if pod == s.AppInfo.PodName && svc == s.AppInfo.ServiceName {
+	if s.isLocalPod(svc, pod) {
 		resp, err := s.doGet(ctx, s.Config.AppURL+targetPath)
 		if err != nil {
 			writeError(w, http.StatusBadGateway, fmt.Errorf("app unreachable: %w", err))
@@ -220,14 +220,13 @@ func (s *Sidecar) proxyKeysToApp(ctx context.Context, w http.ResponseWriter, r *
 	}
 
 	// Prevent proxy loops
-	if r.Header.Get("X-Shudhi-Proxied") != "" {
+	if isProxied(r) {
 		writeError(w, http.StatusLoopDetected, fmt.Errorf("proxy loop detected"))
 		return
 	}
 
 	// Proxy to target pod's sidecar
-	podRedisKey := fmt.Sprintf("inmem:pod:%s:%s", svc, pod)
-	targetURL, err := s.Redis.Get(ctx, podRedisKey).Result()
+	targetURL, err := s.Redis.Get(ctx, podKeyFor(svc, pod)).Result()
 	if err != nil {
 		writeError(w, http.StatusNotFound, fmt.Errorf("pod not found"))
 		return
@@ -236,7 +235,11 @@ func (s *Sidecar) proxyKeysToApp(ctx context.Context, w http.ResponseWriter, r *
 	// Forward full /api/keys request to target sidecar (which will call its local app)
 	fwdQ := r.URL.Query()
 	fwdURL := targetURL + "/api/keys?" + fwdQ.Encode()
-	proxyReq, _ := http.NewRequestWithContext(ctx, "GET", fwdURL, nil)
+	proxyReq, err := http.NewRequestWithContext(ctx, http.MethodGet, fwdURL, nil)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, fmt.Errorf("build proxy request: %w", err))
+		return
+	}
 	proxyReq.Header.Set("X-Shudhi-Proxied", "true")
 	if s.Config.InMemToken != "" {
 		proxyReq.Header.Set("x-inmem-token", s.Config.InMemToken)
@@ -254,7 +257,7 @@ func (s *Sidecar) proxyKeysToApp(ctx context.Context, w http.ResponseWriter, r *
 }
 
 func (s *Sidecar) getKeysForPod(ctx context.Context, svc, pod string) ([]map[string]any, error) {
-	hashKey := fmt.Sprintf("inmem:keys:%s:%s", svc, pod)
+	hashKey := keysHashKeyFor(svc, pod)
 	entries, err := s.Redis.HGetAll(ctx, hashKey).Result()
 	if err != nil {
 		return nil, err
@@ -286,35 +289,40 @@ func (s *Sidecar) handlePodGet(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
 	// if it's this pod, call local app directly
-	if req.PodName == s.AppInfo.PodName && req.ServiceName == s.AppInfo.ServiceName {
+	if s.isLocalPod(req.ServiceName, req.PodName) {
 		s.proxyGetToApp(ctx, w, req.Key)
 		return
 	}
 
 	// prevent infinite proxy loops
-	if r.Header.Get("X-Shudhi-Proxied") != "" {
+	if isProxied(r) {
 		writeError(w, http.StatusLoopDetected, fmt.Errorf("proxy loop detected"))
 		return
 	}
 
 	// try direct HTTP to target sidecar
-	podRedisKey := fmt.Sprintf("inmem:pod:%s:%s", req.ServiceName, req.PodName)
-	targetURL, err := s.Redis.Get(ctx, podRedisKey).Result()
+	targetURL, err := s.Redis.Get(ctx, podKeyFor(req.ServiceName, req.PodName)).Result()
 	if err == nil {
 		body, _ := json.Marshal(PodGetReq{ServiceName: req.ServiceName, PodName: req.PodName, Key: req.Key})
-		proxyReq, _ := http.NewRequestWithContext(ctx, "POST", targetURL+"/api/pod/get", strings.NewReader(string(body)))
-		proxyReq.Header.Set("Content-Type", "application/json")
-		proxyReq.Header.Set("X-Shudhi-Proxied", "true")
-		if s.Config.InMemToken != "" {
-			proxyReq.Header.Set("x-inmem-token", s.Config.InMemToken)
+		proxyReq, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, targetURL+"/api/pod/get", strings.NewReader(string(body)))
+		if reqErr != nil {
+			log.Printf("build direct request to %s failed, falling back to pubsub: %v", req.PodName, reqErr)
+		} else {
+			proxyReq.Header.Set("Content-Type", "application/json")
+			proxyReq.Header.Set("X-Shudhi-Proxied", "true")
+			if s.Config.InMemToken != "" {
+				proxyReq.Header.Set("x-inmem-token", s.Config.InMemToken)
+			}
+
+			resp, httpErr := s.ProxyHTTP.Do(proxyReq)
+			if httpErr == nil {
+				defer drainClose(resp)
+				copyJSON(w, resp)
+				return
+			}
+
+			log.Printf("direct HTTP to %s failed, falling back to pubsub: %v", req.PodName, httpErr)
 		}
-		resp, httpErr := s.ProxyHTTP.Do(proxyReq)
-		if httpErr == nil {
-			defer drainClose(resp)
-			copyJSON(w, resp)
-			return
-		}
-		log.Printf("direct HTTP to %s failed, falling back to pubsub: %v", req.PodName, httpErr)
 	}
 
 	// fallback: pub/sub RPC
@@ -379,17 +387,28 @@ func (s *Sidecar) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// merge acks into results
+	results, confirmed := mergeRefreshResults(results, acks, pods)
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"service":   req.ServiceName,
+		"total":     totalPods,
+		"confirmed": confirmed,
+		"pods":      results,
+	})
+}
+
+// mergeRefreshResults combines local + broadcast acks with a "no response"
+// entry for any pod that never acked, and counts how many succeeded.
+func mergeRefreshResults(local []PodAckResult, acks []RefreshAck, pods []PodInfo) ([]PodAckResult, int) {
+	results := local
 	for _, ack := range acks {
 		results = append(results, PodAckResult{PodName: ack.PodName, Success: ack.Success, Error: ack.Error})
 	}
 
-	// figure out which pods didn't respond
-	responded := map[string]bool{}
+	responded := make(map[string]bool, len(results))
 	for _, r := range results {
 		responded[r.PodName] = true
 	}
-
 	for _, p := range pods {
 		if !responded[p.PodName] {
 			results = append(results, PodAckResult{PodName: p.PodName, Success: false, Error: "no response (timeout)"})
@@ -403,12 +422,7 @@ func (s *Sidecar) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{
-		"service":   req.ServiceName,
-		"total":     totalPods,
-		"confirmed": confirmed,
-		"pods":      results,
-	})
+	return results, confirmed
 }
 
 // --- health ---

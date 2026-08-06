@@ -173,11 +173,26 @@ func (s *Sidecar) fetchAppInfo(ctx context.Context) (AppInfo, error) {
 }
 
 func (s *Sidecar) podKey() string {
-	return fmt.Sprintf("inmem:pod:%s:%s", s.AppInfo.ServiceName, s.AppInfo.PodName)
+	return podKeyFor(s.AppInfo.ServiceName, s.AppInfo.PodName)
 }
 
 func (s *Sidecar) keysKey() string {
-	return fmt.Sprintf("inmem:keys:%s:%s", s.AppInfo.ServiceName, s.AppInfo.PodName)
+	return keysHashKeyFor(s.AppInfo.ServiceName, s.AppInfo.PodName)
+}
+
+// podScanPattern matches every registered pod key across all services.
+const podScanPattern = "inmem:pod:*"
+
+func podKeyFor(svc, pod string) string {
+	return fmt.Sprintf("inmem:pod:%s:%s", svc, pod)
+}
+
+func podPrefixFor(svc string) string {
+	return fmt.Sprintf("inmem:pod:%s:", svc)
+}
+
+func keysHashKeyFor(svc, pod string) string {
+	return fmt.Sprintf("inmem:keys:%s:%s", svc, pod)
 }
 
 func (s *Sidecar) sidecarURL() string {
