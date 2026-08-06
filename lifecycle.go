@@ -12,11 +12,11 @@ const (
 	heartbeatInt = 30 * time.Second
 )
 
-func (s *Sidecar) Register(ctx context.Context) error {
+func (s *sidecar) Register(ctx context.Context) error {
 	return s.Redis.Set(ctx, s.podKey(), s.sidecarURL(), podTTL).Err()
 }
 
-func (s *Sidecar) Deregister(ctx context.Context) {
+func (s *sidecar) Deregister(ctx context.Context) {
 	if err := s.Redis.Del(ctx, s.podKey()).Err(); err != nil {
 		log.Printf("deregister failed: %v", err)
 	}
@@ -27,7 +27,7 @@ func (s *Sidecar) Deregister(ctx context.Context) {
 
 // Heartbeat re-registers the pod in Redis on each tick.
 // Returns an error if too many consecutive failures occur (triggers reconnect).
-func (s *Sidecar) Heartbeat(ctx context.Context) error {
+func (s *sidecar) Heartbeat(ctx context.Context) error {
 	ticker := time.NewTicker(heartbeatInt)
 	defer ticker.Stop()
 	consecutiveFails := 0

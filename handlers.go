@@ -15,7 +15,7 @@ const maxBroadcastRetries = 3
 
 // --- registerKey: app registers a cached key ---
 
-func (s *Sidecar) handleRegisterKey(w http.ResponseWriter, r *http.Request) {
+func (s *sidecar) handleRegisterKey(w http.ResponseWriter, r *http.Request) {
 	if !s.IsReady() {
 		// accept silently — don't break the app, keys will re-register later
 		w.WriteHeader(http.StatusAccepted)
@@ -49,7 +49,7 @@ func (s *Sidecar) handleRegisterKey(w http.ResponseWriter, r *http.Request) {
 
 // --- services: list all service names ---
 
-func (s *Sidecar) handleServices(w http.ResponseWriter, r *http.Request) {
+func (s *sidecar) handleServices(w http.ResponseWriter, r *http.Request) {
 	services, err := s.scanServices(r.Context())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
@@ -59,7 +59,7 @@ func (s *Sidecar) handleServices(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"services": services})
 }
 
-func (s *Sidecar) scanServices(ctx context.Context) ([]string, error) {
+func (s *sidecar) scanServices(ctx context.Context) ([]string, error) {
 	seen := map[string]bool{}
 	var cursor uint64
 
@@ -93,7 +93,7 @@ func (s *Sidecar) scanServices(ctx context.Context) ([]string, error) {
 
 // --- pods: list live pods for a service ---
 
-func (s *Sidecar) handlePods(w http.ResponseWriter, r *http.Request) {
+func (s *sidecar) handlePods(w http.ResponseWriter, r *http.Request) {
 	svc := r.URL.Query().Get("service")
 	if svc == "" {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("service param required"))
@@ -109,7 +109,7 @@ func (s *Sidecar) handlePods(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"pods": pods})
 }
 
-func (s *Sidecar) scanPods(ctx context.Context, svc string) ([]PodInfo, error) {
+func (s *sidecar) scanPods(ctx context.Context, svc string) ([]PodInfo, error) {
 	var pods []PodInfo
 	var cursor uint64
 	prefix := podPrefixFor(svc)
@@ -139,7 +139,7 @@ func (s *Sidecar) scanPods(ctx context.Context, svc string) ([]PodInfo, error) {
 
 // --- keys: list registered keys ---
 
-func (s *Sidecar) handleKeys(w http.ResponseWriter, r *http.Request) {
+func (s *sidecar) handleKeys(w http.ResponseWriter, r *http.Request) {
 	svc := r.URL.Query().Get("service")
 	if svc == "" {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("service param required"))
@@ -190,7 +190,7 @@ func (s *Sidecar) handleKeys(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"keys": result, "source": "registry"})
 }
 
-func (s *Sidecar) proxyKeysToApp(ctx context.Context, w http.ResponseWriter, r *http.Request, svc, pod, pattern, limit, offset string) {
+func (s *sidecar) proxyKeysToApp(ctx context.Context, w http.ResponseWriter, r *http.Request, svc, pod, pattern, limit, offset string) {
 	// Build /inMem/keys query string for the app
 	q := url.Values{}
 	if pattern != "" {
@@ -256,7 +256,7 @@ func (s *Sidecar) proxyKeysToApp(ctx context.Context, w http.ResponseWriter, r *
 	copyJSON(w, resp)
 }
 
-func (s *Sidecar) getKeysForPod(ctx context.Context, svc, pod string) ([]map[string]any, error) {
+func (s *sidecar) getKeysForPod(ctx context.Context, svc, pod string) ([]map[string]any, error) {
 	hashKey := keysHashKeyFor(svc, pod)
 	entries, err := s.Redis.HGetAll(ctx, hashKey).Result()
 	if err != nil {
@@ -279,7 +279,7 @@ func (s *Sidecar) getKeysForPod(ctx context.Context, svc, pod string) ([]map[str
 
 // --- pod/get: query a specific pod for a key's value ---
 
-func (s *Sidecar) handlePodGet(w http.ResponseWriter, r *http.Request) {
+func (s *sidecar) handlePodGet(w http.ResponseWriter, r *http.Request) {
 	var req PodGetReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -335,7 +335,7 @@ func (s *Sidecar) handlePodGet(w http.ResponseWriter, r *http.Request) {
 	writeRawJSON(w, http.StatusOK, result)
 }
 
-func (s *Sidecar) proxyGetToApp(ctx context.Context, w http.ResponseWriter, key string) {
+func (s *sidecar) proxyGetToApp(ctx context.Context, w http.ResponseWriter, key string) {
 	body, _ := json.Marshal(map[string]string{"key": key})
 	resp, err := s.doPost(ctx, s.Config.AppURL+"/internal/inMem/get", "application/json", strings.NewReader(string(body)))
 	if err != nil {
@@ -349,7 +349,7 @@ func (s *Sidecar) proxyGetToApp(ctx context.Context, w http.ResponseWriter, key 
 
 // --- refresh: publish to target service's broadcast channel ---
 
-func (s *Sidecar) handleRefresh(w http.ResponseWriter, r *http.Request) {
+func (s *sidecar) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	var req RefreshReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.ServiceName == "" {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("serviceName required"))
@@ -427,7 +427,7 @@ func mergeRefreshResults(local []PodAckResult, acks []RefreshAck, pods []PodInfo
 
 // --- health ---
 
-func (s *Sidecar) handleHealth(w http.ResponseWriter, r *http.Request) {
+func (s *sidecar) handleHealth(w http.ResponseWriter, r *http.Request) {
 	redisOK := s.Redis.Ping(r.Context()).Err() == nil
 	appReady := s.IsReady()
 

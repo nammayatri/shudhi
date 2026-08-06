@@ -5,7 +5,7 @@ import (
 	"net/http"
 )
 
-func (s *Sidecar) Routes() http.Handler {
+func (s *sidecar) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/registerKey", s.handleRegisterKey)
 	mux.HandleFunc("GET /api/services", s.requireReady(s.handleServices))
@@ -17,7 +17,7 @@ func (s *Sidecar) Routes() http.Handler {
 	return mux
 }
 
-func (s *Sidecar) requireReady(next http.HandlerFunc) http.HandlerFunc {
+func (s *sidecar) requireReady(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if !s.IsReady() {
 			writeError(w, http.StatusServiceUnavailable, errors.New("sidecar not connected to app yet"))

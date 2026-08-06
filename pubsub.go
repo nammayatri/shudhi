@@ -12,7 +12,7 @@ import (
 
 // SubscribePubSub subscribes to broadcast and targeted channels.
 // It automatically reconnects on failure until ctx is cancelled.
-func (s *Sidecar) SubscribePubSub(ctx context.Context) {
+func (s *sidecar) SubscribePubSub(ctx context.Context) {
 	for {
 		err := s.runPubSubLoop(ctx)
 		if ctx.Err() != nil {
@@ -27,7 +27,7 @@ func (s *Sidecar) SubscribePubSub(ctx context.Context) {
 	}
 }
 
-func (s *Sidecar) runPubSubLoop(ctx context.Context) error {
+func (s *sidecar) runPubSubLoop(ctx context.Context) error {
 	broadcastCh := pubsubChannel(s.AppInfo.ServiceName)
 	requestCh := podRequestChannel(s.AppInfo.ServiceName, s.AppInfo.PodName)
 
@@ -60,7 +60,7 @@ func (s *Sidecar) runPubSubLoop(ctx context.Context) error {
 	}
 }
 
-func (s *Sidecar) handleBroadcast(ctx context.Context, payload string) {
+func (s *sidecar) handleBroadcast(ctx context.Context, payload string) {
 	var m PubSubMessage
 	if err := json.Unmarshal([]byte(payload), &m); err != nil {
 		log.Printf("pubsub: bad message: %v", err)
@@ -75,7 +75,7 @@ func (s *Sidecar) handleBroadcast(ctx context.Context, payload string) {
 	}
 }
 
-func (s *Sidecar) applyRefreshWithRetry(ctx context.Context, m PubSubMessage) {
+func (s *sidecar) applyRefreshWithRetry(ctx context.Context, m PubSubMessage) {
 	var lastErr error
 	for attempt := 1; attempt <= maxBroadcastRetries; attempt++ {
 		resp, err := s.doPost(
@@ -113,7 +113,7 @@ func (s *Sidecar) applyRefreshWithRetry(ctx context.Context, m PubSubMessage) {
 	s.sendRefreshAck(ctx, m.ReplyTo, false, lastErr.Error())
 }
 
-func (s *Sidecar) sendRefreshAck(ctx context.Context, replyTo string, success bool, errMsg string) {
+func (s *sidecar) sendRefreshAck(ctx context.Context, replyTo string, success bool, errMsg string) {
 	if replyTo == "" {
 		return
 	}
@@ -132,7 +132,7 @@ type PodRequest struct {
 	ReplyTo string          `json:"replyTo"`
 }
 
-func (s *Sidecar) handlePodRequest(ctx context.Context, payload string) {
+func (s *sidecar) handlePodRequest(ctx context.Context, payload string) {
 	var req PodRequest
 	if err := json.Unmarshal([]byte(payload), &req); err != nil {
 		log.Printf("pod request: bad message: %v", err)
@@ -157,7 +157,7 @@ func (s *Sidecar) handlePodRequest(ctx context.Context, payload string) {
 }
 
 // pubsubGet sends a get request to a specific pod via pub/sub and waits for response
-func (s *Sidecar) pubsubGet(ctx context.Context, serviceName, podName, key string) ([]byte, error) {
+func (s *sidecar) pubsubGet(ctx context.Context, serviceName, podName, key string) ([]byte, error) {
 	replyTo := fmt.Sprintf("inmem:reply:%s:%d", s.AppInfo.PodName, time.Now().UnixNano())
 
 	// subscribe to reply channel before publishing
@@ -188,7 +188,7 @@ func (s *Sidecar) pubsubGet(ctx context.Context, serviceName, podName, key strin
 }
 
 // publishRefresh publishes a refresh to any service's broadcast channel
-func (s *Sidecar) publishRefresh(ctx context.Context, serviceName string, appPayload []byte, replyTo string) error {
+func (s *sidecar) publishRefresh(ctx context.Context, serviceName string, appPayload []byte, replyTo string) error {
 	msg, _ := json.Marshal(PubSubMessage{
 		Action:    "refresh",
 		Payload:   appPayload,
@@ -200,7 +200,7 @@ func (s *Sidecar) publishRefresh(ctx context.Context, serviceName string, appPay
 }
 
 // publishRefreshAndCollectAcks publishes a refresh and waits for per-pod confirmations.
-func (s *Sidecar) publishRefreshAndCollectAcks(ctx context.Context, serviceName string, appPayload []byte, expectedPods int) ([]RefreshAck, error) {
+func (s *sidecar) publishRefreshAndCollectAcks(ctx context.Context, serviceName string, appPayload []byte, expectedPods int) ([]RefreshAck, error) {
 	replyTo := fmt.Sprintf("inmem:refresh-ack:%s:%d", s.AppInfo.PodName, time.Now().UnixNano())
 
 	// subscribe before publishing so we don't miss acks

@@ -31,7 +31,7 @@ func copyJSON(w http.ResponseWriter, resp *http.Response) {
 }
 
 // isLocalPod reports whether svc/pod refers to this sidecar's own app instance.
-func (s *Sidecar) isLocalPod(svc, pod string) bool {
+func (s *sidecar) isLocalPod(svc, pod string) bool {
 	return pod == s.AppInfo.PodName && svc == s.AppInfo.ServiceName
 }
 
