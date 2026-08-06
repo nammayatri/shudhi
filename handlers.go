@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"net/url"
@@ -14,38 +13,9 @@ import (
 
 const maxBroadcastRetries = 3
 
-func (s *Sidecar) Routes() http.Handler {
-	mux := http.NewServeMux()
-	mux.HandleFunc("POST /api/registerKey", s.handleRegisterKey)
-	mux.HandleFunc("GET /api/services", s.requireReady(s.handleServices))
-	mux.HandleFunc("GET /api/pods", s.requireReady(s.handlePods))
-	mux.HandleFunc("GET /api/keys", s.requireReady(s.handleKeys))
-	mux.HandleFunc("POST /api/pod/get", s.requireReady(s.handlePodGet))
-	mux.HandleFunc("POST /api/refresh", s.requireReady(s.handleRefresh))
-	mux.HandleFunc("GET /api/health", s.handleHealth)
-	return mux
-}
-
-func (s *Sidecar) requireReady(next http.HandlerFunc) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		if !s.IsReady() {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			json.NewEncoder(w).Encode(map[string]string{"error": "sidecar not connected to app yet"})
-			return
-		}
-		next(w, r)
-	}
-}
-
 // --- registerKey: app registers a cached key ---
 
-type RegisterKeyReq struct {
-	KeyName      string           `json:"keyName"`
-	KeySchema    *json.RawMessage `json:"keySchema"`
-	TTLInSeconds int              `json:"ttlInSeconds,omitempty"`
-}
-
-func (s *Sidecar) handleRegisterKey(w http.ResponseWriter, r *http.Request) {
+func (s *sidecar) handleRegisterKey(w http.ResponseWriter, r *http.Request) {
 	if !s.IsReady() {
 		// accept silently — don't break the app, keys will re-register later
 		w.WriteHeader(http.StatusAccepted)
@@ -54,7 +24,7 @@ func (s *Sidecar) handleRegisterKey(w http.ResponseWriter, r *http.Request) {
 
 	var req RegisterKeyReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, err)
 		return
 	}
 
@@ -70,31 +40,35 @@ func (s *Sidecar) handleRegisterKey(w http.ResponseWriter, r *http.Request) {
 	pipe.HSet(ctx, key, req.KeyName, string(val))
 	pipe.Expire(ctx, key, 3*24*time.Hour)
 	if _, err := pipe.Exec(ctx); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+
 	w.WriteHeader(http.StatusOK)
 }
 
 // --- services: list all service names ---
 
-func (s *Sidecar) handleServices(w http.ResponseWriter, r *http.Request) {
+func (s *sidecar) handleServices(w http.ResponseWriter, r *http.Request) {
 	services, err := s.scanServices(r.Context())
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	json.NewEncoder(w).Encode(map[string]any{"services": services})
+
+	writeJSON(w, http.StatusOK, map[string]any{"services": services})
 }
 
-func (s *Sidecar) scanServices(ctx context.Context) ([]string, error) {
+func (s *sidecar) scanServices(ctx context.Context) ([]string, error) {
 	seen := map[string]bool{}
 	var cursor uint64
+
 	for {
-		keys, next, err := s.Redis.Scan(ctx, cursor, "inmem:pod:*", 100).Result()
+		keys, next, err := s.Redis.Scan(ctx, cursor, podScanPattern, 100).Result()
 		if err != nil {
 			return nil, err
 		}
+
 		for _, k := range keys {
 			// inmem:pod:<serviceName>:<podName>
 			parts := strings.SplitN(k, ":", 4)
@@ -102,44 +76,44 @@ func (s *Sidecar) scanServices(ctx context.Context) ([]string, error) {
 				seen[parts[2]] = true
 			}
 		}
+
 		cursor = next
 		if cursor == 0 {
 			break
 		}
 	}
+
 	out := make([]string, 0, len(seen))
 	for svc := range seen {
 		out = append(out, svc)
 	}
+
 	return out, nil
 }
 
 // --- pods: list live pods for a service ---
 
-func (s *Sidecar) handlePods(w http.ResponseWriter, r *http.Request) {
+func (s *sidecar) handlePods(w http.ResponseWriter, r *http.Request) {
 	svc := r.URL.Query().Get("service")
 	if svc == "" {
-		http.Error(w, "service param required", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, fmt.Errorf("service param required"))
 		return
 	}
 
 	pods, err := s.scanPods(r.Context(), svc)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
-	json.NewEncoder(w).Encode(map[string]any{"pods": pods})
+
+	writeJSON(w, http.StatusOK, map[string]any{"pods": pods})
 }
 
-type PodInfo struct {
-	PodName    string `json:"podName"`
-	SidecarURL string `json:"sidecarUrl"`
-}
-
-func (s *Sidecar) scanPods(ctx context.Context, svc string) ([]PodInfo, error) {
+func (s *sidecar) scanPods(ctx context.Context, svc string) ([]PodInfo, error) {
 	var pods []PodInfo
 	var cursor uint64
-	prefix := fmt.Sprintf("inmem:pod:%s:", svc)
+	prefix := podPrefixFor(svc)
+
 	for {
 		keys, next, err := s.Redis.Scan(ctx, cursor, prefix+"*", 100).Result()
 		if err != nil {
@@ -153,20 +127,22 @@ func (s *Sidecar) scanPods(ctx context.Context, svc string) ([]PodInfo, error) {
 			}
 			pods = append(pods, PodInfo{PodName: podName, SidecarURL: url})
 		}
+
 		cursor = next
 		if cursor == 0 {
 			break
 		}
 	}
+
 	return pods, nil
 }
 
 // --- keys: list registered keys ---
 
-func (s *Sidecar) handleKeys(w http.ResponseWriter, r *http.Request) {
+func (s *sidecar) handleKeys(w http.ResponseWriter, r *http.Request) {
 	svc := r.URL.Query().Get("service")
 	if svc == "" {
-		http.Error(w, "service param required", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, fmt.Errorf("service param required"))
 		return
 	}
 	pod := r.URL.Query().Get("pod")
@@ -186,16 +162,19 @@ func (s *Sidecar) handleKeys(w http.ResponseWriter, r *http.Request) {
 	var result []map[string]any
 	pods, err := s.scanPods(ctx, svc)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
+
 	for _, p := range pods {
 		entries, err := s.getKeysForPod(ctx, svc, p.PodName)
 		if err != nil {
 			continue
 		}
+
 		result = append(result, entries...)
 	}
+
 	// Client-side filter for pattern when aggregating from Redis
 	if pattern != "" {
 		var filtered []map[string]any
@@ -207,10 +186,11 @@ func (s *Sidecar) handleKeys(w http.ResponseWriter, r *http.Request) {
 		}
 		result = filtered
 	}
-	json.NewEncoder(w).Encode(map[string]any{"keys": result, "source": "registry"})
+
+	writeJSON(w, http.StatusOK, map[string]any{"keys": result, "source": "registry"})
 }
 
-func (s *Sidecar) proxyKeysToApp(ctx context.Context, w http.ResponseWriter, r *http.Request, svc, pod, pattern, limit, offset string) {
+func (s *sidecar) proxyKeysToApp(ctx context.Context, w http.ResponseWriter, r *http.Request, svc, pod, pattern, limit, offset string) {
 	// Build /inMem/keys query string for the app
 	q := url.Values{}
 	if pattern != "" {
@@ -228,160 +208,151 @@ func (s *Sidecar) proxyKeysToApp(ctx context.Context, w http.ResponseWriter, r *
 	}
 
 	// If it's this pod, call local app directly
-	if pod == s.AppInfo.PodName && svc == s.AppInfo.ServiceName {
+	if s.isLocalPod(svc, pod) {
 		resp, err := s.doGet(ctx, s.Config.AppURL+targetPath)
 		if err != nil {
-			http.Error(w, fmt.Sprintf("app unreachable: %v", err), http.StatusBadGateway)
+			writeError(w, http.StatusBadGateway, fmt.Errorf("app unreachable: %w", err))
 			return
 		}
 		defer drainClose(resp)
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(resp.StatusCode)
-		io.Copy(w, resp.Body)
+		copyJSON(w, resp)
 		return
 	}
 
 	// Prevent proxy loops
-	if r.Header.Get("X-Shudhi-Proxied") != "" {
-		http.Error(w, "proxy loop detected", http.StatusLoopDetected)
+	if isProxied(r) {
+		writeError(w, http.StatusLoopDetected, fmt.Errorf("proxy loop detected"))
 		return
 	}
 
 	// Proxy to target pod's sidecar
-	podRedisKey := fmt.Sprintf("inmem:pod:%s:%s", svc, pod)
-	targetURL, err := s.Redis.Get(ctx, podRedisKey).Result()
+	targetURL, err := s.Redis.Get(ctx, podKeyFor(svc, pod)).Result()
 	if err != nil {
-		http.Error(w, "pod not found", http.StatusNotFound)
+		writeError(w, http.StatusNotFound, fmt.Errorf("pod not found"))
 		return
 	}
 
 	// Forward full /api/keys request to target sidecar (which will call its local app)
 	fwdQ := r.URL.Query()
 	fwdURL := targetURL + "/api/keys?" + fwdQ.Encode()
-	proxyReq, _ := http.NewRequestWithContext(ctx, "GET", fwdURL, nil)
+	proxyReq, err := http.NewRequestWithContext(ctx, http.MethodGet, fwdURL, nil)
+	if err != nil {
+		writeError(w, http.StatusBadGateway, fmt.Errorf("build proxy request: %w", err))
+		return
+	}
 	proxyReq.Header.Set("X-Shudhi-Proxied", "true")
 	if s.Config.InMemToken != "" {
 		proxyReq.Header.Set("x-inmem-token", s.Config.InMemToken)
 	}
+
 	resp, err := s.ProxyHTTP.Do(proxyReq)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("sidecar unreachable: %v", err), http.StatusBadGateway)
+		writeError(w, http.StatusBadGateway, fmt.Errorf("sidecar unreachable: %w", err))
 		return
 	}
+
 	defer drainClose(resp)
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(resp.StatusCode)
-	io.Copy(w, resp.Body)
+
+	copyJSON(w, resp)
 }
 
-func (s *Sidecar) getKeysForPod(ctx context.Context, svc, pod string) ([]map[string]any, error) {
-	hashKey := fmt.Sprintf("inmem:keys:%s:%s", svc, pod)
+func (s *sidecar) getKeysForPod(ctx context.Context, svc, pod string) ([]map[string]any, error) {
+	hashKey := keysHashKeyFor(svc, pod)
 	entries, err := s.Redis.HGetAll(ctx, hashKey).Result()
 	if err != nil {
 		return nil, err
 	}
+
 	var out []map[string]any
 	for keyName, meta := range entries {
 		var m map[string]any
-		json.Unmarshal([]byte(meta), &m)
+		if err := json.Unmarshal([]byte(meta), &m); err != nil {
+			continue
+		}
 		m["keyName"] = keyName
 		m["podName"] = pod
 		out = append(out, m)
 	}
+
 	return out, nil
 }
 
 // --- pod/get: query a specific pod for a key's value ---
 
-type PodGetReq struct {
-	ServiceName string `json:"serviceName"`
-	PodName     string `json:"podName"`
-	Key         string `json:"key"`
-}
-
-func (s *Sidecar) handlePodGet(w http.ResponseWriter, r *http.Request) {
+func (s *sidecar) handlePodGet(w http.ResponseWriter, r *http.Request) {
 	var req PodGetReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, err)
 		return
 	}
 
 	ctx := r.Context()
 
 	// if it's this pod, call local app directly
-	if req.PodName == s.AppInfo.PodName && req.ServiceName == s.AppInfo.ServiceName {
+	if s.isLocalPod(req.ServiceName, req.PodName) {
 		s.proxyGetToApp(ctx, w, req.Key)
 		return
 	}
 
 	// prevent infinite proxy loops
-	if r.Header.Get("X-Shudhi-Proxied") != "" {
-		http.Error(w, "proxy loop detected", http.StatusLoopDetected)
+	if isProxied(r) {
+		writeError(w, http.StatusLoopDetected, fmt.Errorf("proxy loop detected"))
 		return
 	}
 
 	// try direct HTTP to target sidecar
-	podRedisKey := fmt.Sprintf("inmem:pod:%s:%s", req.ServiceName, req.PodName)
-	targetURL, err := s.Redis.Get(ctx, podRedisKey).Result()
+	targetURL, err := s.Redis.Get(ctx, podKeyFor(req.ServiceName, req.PodName)).Result()
 	if err == nil {
 		body, _ := json.Marshal(PodGetReq{ServiceName: req.ServiceName, PodName: req.PodName, Key: req.Key})
-		proxyReq, _ := http.NewRequestWithContext(ctx, "POST", targetURL+"/api/pod/get", strings.NewReader(string(body)))
-		proxyReq.Header.Set("Content-Type", "application/json")
-		proxyReq.Header.Set("X-Shudhi-Proxied", "true")
-		if s.Config.InMemToken != "" {
-			proxyReq.Header.Set("x-inmem-token", s.Config.InMemToken)
+		proxyReq, reqErr := http.NewRequestWithContext(ctx, http.MethodPost, targetURL+"/api/pod/get", strings.NewReader(string(body)))
+		if reqErr != nil {
+			log.Printf("build direct request to %s failed, falling back to pubsub: %v", req.PodName, reqErr)
+		} else {
+			proxyReq.Header.Set("Content-Type", "application/json")
+			proxyReq.Header.Set("X-Shudhi-Proxied", "true")
+			if s.Config.InMemToken != "" {
+				proxyReq.Header.Set("x-inmem-token", s.Config.InMemToken)
+			}
+
+			resp, httpErr := s.ProxyHTTP.Do(proxyReq)
+			if httpErr == nil {
+				defer drainClose(resp)
+				copyJSON(w, resp)
+				return
+			}
+
+			log.Printf("direct HTTP to %s failed, falling back to pubsub: %v", req.PodName, httpErr)
 		}
-		resp, httpErr := s.ProxyHTTP.Do(proxyReq)
-		if httpErr == nil {
-			defer drainClose(resp)
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(resp.StatusCode)
-			io.Copy(w, resp.Body)
-			return
-		}
-		log.Printf("direct HTTP to %s failed, falling back to pubsub: %v", req.PodName, httpErr)
 	}
 
 	// fallback: pub/sub RPC
 	result, err := s.pubsubGet(ctx, req.ServiceName, req.PodName, req.Key)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("pod unreachable: %v", err), http.StatusBadGateway)
+		writeError(w, http.StatusBadGateway, fmt.Errorf("pod unreachable: %w", err))
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	w.Write(result)
+
+	writeRawJSON(w, http.StatusOK, result)
 }
 
-func (s *Sidecar) proxyGetToApp(ctx context.Context, w http.ResponseWriter, key string) {
+func (s *sidecar) proxyGetToApp(ctx context.Context, w http.ResponseWriter, key string) {
 	body, _ := json.Marshal(map[string]string{"key": key})
 	resp, err := s.doPost(ctx, s.Config.AppURL+"/internal/inMem/get", "application/json", strings.NewReader(string(body)))
 	if err != nil {
-		http.Error(w, fmt.Sprintf("app unreachable: %v", err), http.StatusBadGateway)
+		writeError(w, http.StatusBadGateway, fmt.Errorf("app unreachable: %w", err))
 		return
 	}
+
 	defer drainClose(resp)
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(resp.StatusCode)
-	io.Copy(w, resp.Body)
+	copyJSON(w, resp)
 }
 
 // --- refresh: publish to target service's broadcast channel ---
 
-type RefreshReq struct {
-	ServiceName string  `json:"serviceName"`
-	KeyInfix   *string `json:"keyInfix"`
-}
-
-type PodAckResult struct {
-	PodName string `json:"podName"`
-	Success bool   `json:"success"`
-	Error   string `json:"error,omitempty"`
-}
-
-func (s *Sidecar) handleRefresh(w http.ResponseWriter, r *http.Request) {
+func (s *sidecar) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	var req RefreshReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.ServiceName == "" {
-		http.Error(w, "serviceName required", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, fmt.Errorf("serviceName required"))
 		return
 	}
 
@@ -412,17 +383,29 @@ func (s *Sidecar) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	acks, publishErr := s.publishRefreshAndCollectAcks(ctx, req.ServiceName, appPayload, totalPods)
 	if publishErr != nil {
 		log.Printf("publish refresh failed: %v", publishErr)
-		http.Error(w, fmt.Sprintf("publish failed: %v", publishErr), http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, fmt.Errorf("publish failed: %w", publishErr))
 		return
 	}
 
-	// merge acks into results
+	results, confirmed := mergeRefreshResults(results, acks, pods)
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"service":   req.ServiceName,
+		"total":     totalPods,
+		"confirmed": confirmed,
+		"pods":      results,
+	})
+}
+
+// mergeRefreshResults combines local + broadcast acks with a "no response"
+// entry for any pod that never acked, and counts how many succeeded.
+func mergeRefreshResults(local []PodAckResult, acks []RefreshAck, pods []PodInfo) ([]PodAckResult, int) {
+	results := local
 	for _, ack := range acks {
 		results = append(results, PodAckResult{PodName: ack.PodName, Success: ack.Success, Error: ack.Error})
 	}
 
-	// figure out which pods didn't respond
-	responded := map[string]bool{}
+	responded := make(map[string]bool, len(results))
 	for _, r := range results {
 		responded[r.PodName] = true
 	}
@@ -439,24 +422,17 @@ func (s *Sidecar) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{
-		"service":   req.ServiceName,
-		"total":     totalPods,
-		"confirmed": confirmed,
-		"pods":      results,
-	})
+	return results, confirmed
 }
 
 // --- health ---
 
-func (s *Sidecar) handleHealth(w http.ResponseWriter, r *http.Request) {
+func (s *sidecar) handleHealth(w http.ResponseWriter, r *http.Request) {
 	redisOK := s.Redis.Ping(r.Context()).Err() == nil
 	appReady := s.IsReady()
 
 	// sidecar is always alive (for k8s liveness), but reports readiness status
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]any{
+	writeJSON(w, http.StatusOK, map[string]any{
 		"redis": redisOK,
 		"app":   appReady,
 	})

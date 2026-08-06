@@ -15,7 +15,7 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-type Config struct {
+type config struct {
 	AppURL      string
 	SidecarPort string
 	RedisURL    string
@@ -24,9 +24,9 @@ type Config struct {
 	InMemToken  string
 }
 
-func LoadConfig() Config {
+func LoadConfig() config {
 	db, _ := strconv.Atoi(envOrDefault("REDIS_DB", "0"))
-	return Config{
+	return config{
 		AppURL:      envOrDefault("APP_URL", "http://localhost:8080"),
 		SidecarPort: envOrDefault("SIDECAR_PORT", "8900"),
 		RedisURL:    envOrDefault("REDIS_URL", "localhost:6379"),
@@ -43,15 +43,15 @@ func envOrDefault(key, fallback string) string {
 	return fallback
 }
 
-type AppInfo struct {
+type appInfo struct {
 	ServiceName string `json:"serviceName"`
 	PodName     string `json:"podName"`
 }
 
-type Sidecar struct {
-	Config        Config
+type sidecar struct {
+	Config        config
 	Redis         *redis.Client
-	AppInfo       AppInfo
+	AppInfo       appInfo
 	HTTP          *http.Client
 	ProxyHTTP     *http.Client       // shorter timeout for sidecar-to-sidecar calls
 	ready         atomic.Bool        // true once app info is fetched and registered
@@ -59,9 +59,9 @@ type Sidecar struct {
 	reconnectCh   chan struct{}      // heartbeat signals here when it detects sustained failure
 }
 
-func NewSidecar(cfg Config) *Sidecar {
+func NewSidecar(cfg config) *sidecar {
 	rdb := redis.NewClient(&redis.Options{Addr: cfg.RedisURL, DB: cfg.RedisDB})
-	return &Sidecar{
+	return &sidecar{
 		Config:    cfg,
 		Redis:     rdb,
 		HTTP:      &http.Client{Timeout: 5 * time.Second},
@@ -72,7 +72,7 @@ func NewSidecar(cfg Config) *Sidecar {
 // WaitForApp retries fetching app info until it succeeds or ctx is cancelled.
 // Once connected, registers in Redis and starts heartbeat + pubsub.
 // If heartbeat detects sustained Redis failure, it resets and reconnects.
-func (s *Sidecar) WaitForApp(ctx context.Context) {
+func (s *sidecar) WaitForApp(ctx context.Context) {
 	for {
 		if err := s.tryConnect(ctx); err != nil {
 			log.Printf("waiting for app: %v (retrying in 10s)", err)
@@ -102,7 +102,7 @@ func (s *Sidecar) WaitForApp(ctx context.Context) {
 	}
 }
 
-func (s *Sidecar) tryConnect(ctx context.Context) error {
+func (s *sidecar) tryConnect(ctx context.Context) error {
 	if err := s.Redis.Ping(ctx).Err(); err != nil {
 		return fmt.Errorf("redis: %w", err)
 	}
@@ -137,7 +137,7 @@ func (s *Sidecar) tryConnect(ctx context.Context) error {
 }
 
 // safeGo wraps a function with panic recovery so goroutine crashes don't kill the process.
-func (s *Sidecar) safeGo(name string, fn func()) func() {
+func (s *sidecar) safeGo(name string, fn func()) func() {
 	return func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -148,43 +148,58 @@ func (s *Sidecar) safeGo(name string, fn func()) func() {
 	}
 }
 
-func (s *Sidecar) IsReady() bool {
+func (s *sidecar) IsReady() bool {
 	return s.ready.Load()
 }
 
-func (s *Sidecar) cancelConnect() {
+func (s *sidecar) cancelConnect() {
 	if s.connectCancel != nil {
 		s.connectCancel()
 		s.connectCancel = nil
 	}
 }
 
-func (s *Sidecar) fetchAppInfo(ctx context.Context) (AppInfo, error) {
+func (s *sidecar) fetchAppInfo(ctx context.Context) (appInfo, error) {
 	resp, err := s.doGet(ctx, s.Config.AppURL+"/internal/inMem/serverInfo")
 	if err != nil {
-		return AppInfo{}, err
+		return appInfo{}, err
 	}
 	defer drainClose(resp)
-	var info AppInfo
+	var info appInfo
 	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
-		return AppInfo{}, err
+		return appInfo{}, err
 	}
 	return info, nil
 }
 
-func (s *Sidecar) podKey() string {
-	return fmt.Sprintf("inmem:pod:%s:%s", s.AppInfo.ServiceName, s.AppInfo.PodName)
+func (s *sidecar) podKey() string {
+	return podKeyFor(s.AppInfo.ServiceName, s.AppInfo.PodName)
 }
 
-func (s *Sidecar) keysKey() string {
-	return fmt.Sprintf("inmem:keys:%s:%s", s.AppInfo.ServiceName, s.AppInfo.PodName)
+func (s *sidecar) keysKey() string {
+	return keysHashKeyFor(s.AppInfo.ServiceName, s.AppInfo.PodName)
 }
 
-func (s *Sidecar) sidecarURL() string {
+// podScanPattern matches every registered pod key across all services.
+const podScanPattern = "inmem:pod:*"
+
+func podKeyFor(svc, pod string) string {
+	return fmt.Sprintf("inmem:pod:%s:%s", svc, pod)
+}
+
+func podPrefixFor(svc string) string {
+	return fmt.Sprintf("inmem:pod:%s:", svc)
+}
+
+func keysHashKeyFor(svc, pod string) string {
+	return fmt.Sprintf("inmem:keys:%s:%s", svc, pod)
+}
+
+func (s *sidecar) sidecarURL() string {
 	return fmt.Sprintf("http://%s:%s", s.Config.PodIP, s.Config.SidecarPort)
 }
 
-func (s *Sidecar) doPost(ctx context.Context, url, contentType string, body io.Reader) (*http.Response, error) {
+func (s *sidecar) doPost(ctx context.Context, url, contentType string, body io.Reader) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, "POST", url, body)
 	if err != nil {
 		return nil, err
@@ -196,7 +211,7 @@ func (s *Sidecar) doPost(ctx context.Context, url, contentType string, body io.R
 	return s.HTTP.Do(req)
 }
 
-func (s *Sidecar) doGet(ctx context.Context, url string) (*http.Response, error) {
+func (s *sidecar) doGet(ctx context.Context, url string) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, err
