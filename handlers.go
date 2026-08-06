@@ -68,6 +68,7 @@ func (s *Sidecar) scanServices(ctx context.Context) ([]string, error) {
 		if err != nil {
 			return nil, err
 		}
+
 		for _, k := range keys {
 			// inmem:pod:<serviceName>:<podName>
 			parts := strings.SplitN(k, ":", 4)
@@ -75,6 +76,7 @@ func (s *Sidecar) scanServices(ctx context.Context) ([]string, error) {
 				seen[parts[2]] = true
 			}
 		}
+
 		cursor = next
 		if cursor == 0 {
 			break
@@ -125,6 +127,7 @@ func (s *Sidecar) scanPods(ctx context.Context, svc string) ([]PodInfo, error) {
 			}
 			pods = append(pods, PodInfo{PodName: podName, SidecarURL: url})
 		}
+
 		cursor = next
 		if cursor == 0 {
 			break
@@ -168,6 +171,7 @@ func (s *Sidecar) handleKeys(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			continue
 		}
+
 		result = append(result, entries...)
 	}
 
@@ -259,7 +263,9 @@ func (s *Sidecar) getKeysForPod(ctx context.Context, svc, pod string) ([]map[str
 	var out []map[string]any
 	for keyName, meta := range entries {
 		var m map[string]any
-		json.Unmarshal([]byte(meta), &m)
+		if err := json.Unmarshal([]byte(meta), &m); err != nil {
+			continue
+		}
 		m["keyName"] = keyName
 		m["podName"] = pod
 		out = append(out, m)
