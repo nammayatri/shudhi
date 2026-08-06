@@ -29,3 +29,17 @@ type PodAckResult struct {
 	Success bool   `json:"success"`
 	Error   string `json:"error,omitempty"`
 }
+
+type PubSubMessage struct {
+	Action    string          `json:"action"`
+	Payload   json.RawMessage `json:"payload"`
+	OriginPod string          `json:"originPod"`
+	Timestamp string          `json:"timestamp"`
+	ReplyTo   string          `json:"replyTo,omitempty"`
+}
+
+type RefreshAck struct {
+	PodName string `json:"podName"`
+	Success bool   `json:"success"`
+	Error   string `json:"error,omitempty"`
+}
