@@ -13,6 +13,9 @@ const (
 )
 
 func (s *Sidecar) Register(ctx context.Context) error {
+	// keep the refresh cursor alive alongside the registration, so a pod that
+	// goes a long time without any clears doesn't lose its position
+	s.Redis.Expire(ctx, s.cursorKey(), cursorTTL)
 	return s.Redis.Set(ctx, s.podKey(), s.sidecarURL(), podTTL).Err()
 }
 

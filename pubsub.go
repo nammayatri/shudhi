@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"strconv"
 	"strings"
 	"time"
 
@@ -26,13 +25,24 @@ const (
 	// the refresh log only has to bridge a disconnect, not keep history
 	refreshLogMaxLen = 1000
 	refreshLogTTL    = 24 * time.Hour
-	// bounds how long a missed refresh can go unnoticed when go-redis
-	// reconnects the subscription without surfacing an error
-	refreshCatchUpInterval = 30 * time.Second
+	// a cursor is useless once the entries it points at have aged out, so it
+	// expires on the same clock. Nothing sweeps it — a dead pod's cursor just
+	// expires on its own.
+	cursorTTL = refreshLogTTL
+	// finite so ctx cancellation is noticed promptly on shutdown
+	refreshLogBlock = 5 * time.Second
+	// a refresh the app keeps rejecting must not wedge every later clear for
+	// this pod, so retries are bounded before the cursor moves past it
+	refreshEntryMaxRounds = 10
+	refreshEntryRetryWait = 5 * time.Second
 )
 
 func refreshLogKey(serviceName string) string {
 	return fmt.Sprintf("inmem:refreshlog:%s", serviceName)
+}
+
+func (s *Sidecar) cursorKey() string {
+	return fmt.Sprintf("inmem:cursor:%s:%s", s.AppInfo.ServiceName, s.AppInfo.PodName)
 }
 
 type RefreshAck struct {
@@ -58,11 +68,12 @@ func (s *Sidecar) SubscribePubSub(ctx context.Context) {
 	}
 }
 
+// runPubSubLoop handles targeted pod requests only. Refreshes come off the
+// durable log instead — see ConsumeRefreshLog.
 func (s *Sidecar) runPubSubLoop(ctx context.Context) error {
-	broadcastCh := pubsubChannel(s.AppInfo.ServiceName)
 	requestCh := podRequestChannel(s.AppInfo.ServiceName, s.AppInfo.PodName)
 
-	sub := s.Redis.Subscribe(ctx, broadcastCh, requestCh)
+	sub := s.Redis.Subscribe(ctx, requestCh)
 	defer sub.Close()
 
 	// confirm subscription is active before proceeding
@@ -71,59 +82,29 @@ func (s *Sidecar) runPubSubLoop(ctx context.Context) error {
 	}
 
 	ch := sub.Channel()
-	log.Printf("subscribed to [%s, %s]", broadcastCh, requestCh)
-
-	// pick up anything published while we weren't listening
-	s.catchUpRefreshes(ctx)
-
-	catchUp := time.NewTicker(refreshCatchUpInterval)
-	defer catchUp.Stop()
+	log.Printf("subscribed to [%s]", requestCh)
 
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-catchUp.C:
-			s.catchUpRefreshes(ctx)
 		case msg, ok := <-ch:
 			if !ok {
 				return fmt.Errorf("channel closed")
 			}
-			switch msg.Channel {
-			case broadcastCh:
-				s.handleBroadcast(ctx, msg.Payload)
-			case requestCh:
-				s.handlePodRequest(ctx, msg.Payload)
-			}
+			s.handlePodRequest(ctx, msg.Payload)
 		}
 	}
 }
 
-func (s *Sidecar) handleBroadcast(ctx context.Context, payload string) {
-	var m PubSubMessage
-	if err := json.Unmarshal([]byte(payload), &m); err != nil {
-		log.Printf("pubsub: bad message: %v", err)
-		return
-	}
-	// advance the cursor even for our own messages, so catch-up doesn't
-	// replay a refresh this pod already handled locally
-	s.setLastRefreshID(m.StreamID)
-
-	if m.OriginPod == s.AppInfo.PodName {
-		return
-	}
-	switch m.Action {
-	case "refresh":
-		s.applyRefreshWithRetry(ctx, m)
-	}
-}
-
-func (s *Sidecar) applyRefreshWithRetry(ctx context.Context, m PubSubMessage) {
+// applyRefreshWithRetry clears the local app's cache, retrying a few times.
+// Reports whether the clear actually landed.
+func (s *Sidecar) applyRefreshWithRetry(ctx context.Context, m PubSubMessage) bool {
 	var payload struct {
 		KeyInfix *string `json:"keyInfix"`
 	}
 	if err := json.Unmarshal(m.Payload, &payload); err != nil {
-		log.Printf("pubsub refresh: bad payload, treating as full clear: %v", err)
+		log.Printf("refresh: bad payload, treating as full clear: %v", err)
 	}
 
 	// registry entries come out first and go back on any exit that isn't a
@@ -146,10 +127,10 @@ func (s *Sidecar) applyRefreshWithRetry(ctx context.Context, m PubSubMessage) {
 		)
 		if err != nil {
 			lastErr = err
-			log.Printf("pubsub refresh attempt %d/%d failed: %v", attempt, maxBroadcastRetries, err)
+			log.Printf("refresh attempt %d/%d failed: %v", attempt, maxBroadcastRetries, err)
 			select {
 			case <-ctx.Done():
-				return
+				return false
 			case <-time.After(time.Duration(attempt) * time.Second):
 			}
 			continue
@@ -157,10 +138,10 @@ func (s *Sidecar) applyRefreshWithRetry(ctx context.Context, m PubSubMessage) {
 		drainClose(resp)
 		if resp.StatusCode >= 500 {
 			lastErr = fmt.Errorf("app returned %d", resp.StatusCode)
-			log.Printf("pubsub refresh attempt %d/%d: %v", attempt, maxBroadcastRetries, lastErr)
+			log.Printf("refresh attempt %d/%d: %v", attempt, maxBroadcastRetries, lastErr)
 			select {
 			case <-ctx.Done():
-				return
+				return false
 			case <-time.After(time.Duration(attempt) * time.Second):
 			}
 			continue
@@ -168,10 +149,11 @@ func (s *Sidecar) applyRefreshWithRetry(ctx context.Context, m PubSubMessage) {
 		log.Printf("refresh from %s applied", m.OriginPod)
 		applied = true
 		s.sendRefreshAck(ctx, m.ReplyTo, true, "")
-		return
+		return true
 	}
-	log.Printf("pubsub refresh from %s failed after %d retries: %v", m.OriginPod, maxBroadcastRetries, lastErr)
+	log.Printf("refresh from %s failed after %d attempts: %v", m.OriginPod, maxBroadcastRetries, lastErr)
 	s.sendRefreshAck(ctx, m.ReplyTo, false, lastErr.Error())
+	return false
 }
 
 func (s *Sidecar) sendRefreshAck(ctx context.Context, replyTo string, success bool, errMsg string) {
@@ -248,17 +230,18 @@ func (s *Sidecar) pubsubGet(ctx context.Context, serviceName, podName, key strin
 	return []byte(msg.Payload), nil
 }
 
-// publishRefresh publishes a refresh to any service's broadcast channel.
-// The refresh is appended to the durable log first: pub/sub drops messages for
-// disconnected subscribers, so the log is what lets a pod that missed the live
-// broadcast catch up when it resubscribes.
+// publishRefresh appends a refresh to a service's durable log, which is how
+// every pod of that service receives it. Failing to append means nobody clears,
+// so unlike a dropped pub/sub message this is a hard error.
 func (s *Sidecar) publishRefresh(ctx context.Context, serviceName string, appPayload []byte, replyTo string) error {
-	streamID, err := s.appendRefreshLog(ctx, serviceName, appPayload)
+	streamID, err := s.appendRefreshLog(ctx, serviceName, appPayload, replyTo)
 	if err != nil {
-		// the live broadcast still goes out — reachable pods clear either way
-		log.Printf("refresh log append failed, missed-message catch-up unavailable for this refresh: %v", err)
+		return fmt.Errorf("refresh log append: %w", err)
 	}
 
+	// Compatibility shim: sidecars from before the log consumed refreshes over
+	// pub/sub. Publishing keeps them clearing during a rolling upgrade. Safe to
+	// drop once every sidecar reads the log.
 	msg, _ := json.Marshal(PubSubMessage{
 		Action:    "refresh",
 		Payload:   appPayload,
@@ -267,10 +250,13 @@ func (s *Sidecar) publishRefresh(ctx context.Context, serviceName string, appPay
 		ReplyTo:   replyTo,
 		StreamID:  streamID,
 	})
-	return s.Redis.Publish(ctx, pubsubChannel(serviceName), string(msg)).Err()
+	if err := s.Redis.Publish(ctx, pubsubChannel(serviceName), string(msg)).Err(); err != nil {
+		log.Printf("legacy refresh publish failed (log delivery unaffected): %v", err)
+	}
+	return nil
 }
 
-func (s *Sidecar) appendRefreshLog(ctx context.Context, serviceName string, appPayload []byte) (string, error) {
+func (s *Sidecar) appendRefreshLog(ctx context.Context, serviceName string, appPayload []byte, replyTo string) (string, error) {
 	key := refreshLogKey(serviceName)
 	id, err := s.Redis.XAdd(ctx, &redis.XAddArgs{
 		Stream: key,
@@ -279,6 +265,7 @@ func (s *Sidecar) appendRefreshLog(ctx context.Context, serviceName string, appP
 		Values: map[string]any{
 			"payload":   string(appPayload),
 			"originPod": s.AppInfo.PodName,
+			"replyTo":   replyTo,
 		},
 	}).Result()
 	if err != nil {
@@ -289,107 +276,143 @@ func (s *Sidecar) appendRefreshLog(ctx context.Context, serviceName string, appP
 	return id, nil
 }
 
-// catchUpRefreshes replays refreshes that landed while this pod wasn't
-// listening. Redis pub/sub has no replay for a disconnected subscriber, so
-// without this a pod that blips during a clear serves stale cache indefinitely.
+// ConsumeRefreshLog is how this pod receives cache clears. It blocks on the
+// service's refresh log and applies each entry in order, committing its cursor
+// to Redis only after the app has actually cleared.
 //
-// Runs on every (re)subscribe and on a ticker — go-redis reconnects the
-// underlying connection transparently, so a dropped subscription doesn't
-// necessarily surface as an error we could hook.
-func (s *Sidecar) catchUpRefreshes(ctx context.Context) {
+// The cursor is per-pod and durable, so a sidecar that drops its connection —
+// or restarts entirely — resumes exactly where it left off instead of missing
+// whatever landed in the gap. Deliberately not a consumer group: a group
+// distributes each entry to one member, which would leave every other pod
+// serving stale cache.
+func (s *Sidecar) ConsumeRefreshLog(ctx context.Context) {
 	key := refreshLogKey(s.AppInfo.ServiceName)
-	last := s.getLastRefreshID()
 
-	// first time through: start at the tail. Anything already in the log
-	// predates this pod's cache, so there's nothing to catch up on.
-	if last == "" {
-		tail, err := s.Redis.XRevRangeN(ctx, key, "+", "-", 1).Result()
-		if err != nil {
-			log.Printf("refresh log: reading tail failed: %v", err)
+	cursor, err := s.loadCursor(ctx)
+	if err != nil {
+		if ctx.Err() != nil {
 			return
 		}
-		if len(tail) > 0 {
-			s.setLastRefreshID(tail[0].ID)
-		} else {
-			s.setLastRefreshID("0-0")
+		log.Printf("refresh log: resolving cursor failed: %v (retrying in 3s)", err)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(3 * time.Second):
 		}
-		return
+		cursor = "0-0"
 	}
+	log.Printf("consuming %s from %s", key, cursor)
 
-	streams, err := s.Redis.XRead(ctx, &redis.XReadArgs{
-		Streams: []string{key, last},
-		Count:   refreshLogMaxLen,
-		Block:   -1, // don't block; we just want whatever is already there
-	}).Result()
-	if err == redis.Nil {
-		return // nothing missed
-	}
-	if err != nil {
-		if ctx.Err() == nil {
-			log.Printf("refresh log: read from %s failed: %v", last, err)
+	for {
+		if ctx.Err() != nil {
+			return
 		}
-		return
-	}
 
-	for _, stream := range streams {
-		for _, entry := range stream.Messages {
-			s.setLastRefreshID(entry.ID)
-
-			origin, _ := entry.Values["originPod"].(string)
-			if origin == s.AppInfo.PodName {
-				continue
+		streams, err := s.Redis.XRead(ctx, &redis.XReadArgs{
+			Streams: []string{key, cursor},
+			Count:   refreshLogMaxLen,
+			Block:   refreshLogBlock,
+		}).Result()
+		if err == redis.Nil {
+			continue // block expired with nothing new
+		}
+		if err != nil {
+			if ctx.Err() != nil {
+				return
 			}
-			payload, _ := entry.Values["payload"].(string)
+			log.Printf("refresh log: read from %s failed: %v (retrying in 3s)", cursor, err)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(3 * time.Second):
+			}
+			continue
+		}
 
-			log.Printf("catch-up: replaying missed refresh %s from %s", entry.ID, origin)
-			// no ReplyTo — the original caller stopped waiting for acks long ago
-			s.applyRefreshWithRetry(ctx, PubSubMessage{
-				Action:    "refresh",
-				Payload:   json.RawMessage(payload),
-				OriginPod: origin,
-			})
+		for _, stream := range streams {
+			for _, entry := range stream.Messages {
+				if ctx.Err() != nil {
+					return
+				}
+				s.applyRefreshEntry(ctx, entry)
+				cursor = entry.ID
+				s.saveCursor(ctx, cursor)
+			}
 		}
 	}
 }
 
-func (s *Sidecar) setLastRefreshID(id string) {
-	if id == "" {
-		return
+// applyRefreshEntry clears the local app for one log entry, retrying until it
+// lands. It returns once applied, or once retries are exhausted — the caller
+// commits the cursor either way, since a refresh the app keeps rejecting must
+// not wedge every clear behind it.
+func (s *Sidecar) applyRefreshEntry(ctx context.Context, entry redis.XMessage) {
+	origin, _ := entry.Values["originPod"].(string)
+	if origin == s.AppInfo.PodName {
+		return // the handler that published this already cleared us locally
 	}
-	s.refreshMu.Lock()
-	defer s.refreshMu.Unlock()
-	// only ever move forward, so a stale or duplicate delivery can't rewind the
-	// cursor and cause the same refresh to replay on every reconnect
-	if s.lastRefreshID == "" || streamIDLess(s.lastRefreshID, id) {
-		s.lastRefreshID = id
+	payload, _ := entry.Values["payload"].(string)
+	replyTo, _ := entry.Values["replyTo"].(string)
+
+	m := PubSubMessage{
+		Action:    "refresh",
+		Payload:   json.RawMessage(payload),
+		OriginPod: origin,
+		ReplyTo:   replyTo,
 	}
+
+	for round := 1; round <= refreshEntryMaxRounds; round++ {
+		if s.applyRefreshWithRetry(ctx, m) {
+			return
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		if round < refreshEntryMaxRounds {
+			log.Printf("refresh %s not applied, retrying (round %d/%d)", entry.ID, round, refreshEntryMaxRounds)
+			// the caller is long past its ack timeout; only the first round acks
+			m.ReplyTo = ""
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(refreshEntryRetryWait):
+			}
+		}
+	}
+	log.Printf("ERROR: giving up on refresh %s from %s after %d rounds — this pod may be serving stale cache",
+		entry.ID, origin, refreshEntryMaxRounds)
 }
 
-func (s *Sidecar) getLastRefreshID() string {
-	s.refreshMu.Lock()
-	defer s.refreshMu.Unlock()
-	return s.lastRefreshID
+// loadCursor returns where this pod should resume reading. A stored cursor wins;
+// otherwise it starts at the tail, since anything already logged predates this
+// pod's cache and replaying it would be busywork.
+func (s *Sidecar) loadCursor(ctx context.Context) (string, error) {
+	id, err := s.Redis.Get(ctx, s.cursorKey()).Result()
+	if err == nil && id != "" {
+		return id, nil
+	}
+	if err != nil && err != redis.Nil {
+		return "", err
+	}
+
+	tail, err := s.Redis.XRevRangeN(ctx, refreshLogKey(s.AppInfo.ServiceName), "+", "-", 1).Result()
+	if err != nil {
+		return "", err
+	}
+	if len(tail) > 0 {
+		return tail[0].ID, nil
+	}
+	return "0-0", nil
 }
 
-// streamIDLess reports whether Redis stream ID a sorts before b. IDs are
-// "<millis>-<seq>" with no zero padding, so a plain string compare gets
-// "9-0" vs "10-0" backwards.
-func streamIDLess(a, b string) bool {
-	aMS, aSeq := splitStreamID(a)
-	bMS, bSeq := splitStreamID(b)
-	if aMS != bMS {
-		return aMS < bMS
+func (s *Sidecar) saveCursor(ctx context.Context, id string) {
+	// detached: a cancelled ctx must not lose a cursor for work already done,
+	// or the pod would re-apply the same clears on its next start
+	saveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	if err := s.Redis.Set(saveCtx, s.cursorKey(), id, cursorTTL).Err(); err != nil {
+		log.Printf("refresh log: saving cursor %s failed: %v", id, err)
 	}
-	return aSeq < bSeq
-}
-
-func splitStreamID(id string) (ms, seq uint64) {
-	base, tail, found := strings.Cut(id, "-")
-	ms, _ = strconv.ParseUint(base, 10, 64)
-	if found {
-		seq, _ = strconv.ParseUint(tail, 10, 64)
-	}
-	return ms, seq
 }
 
 // publishRefreshAndCollectAcks publishes a refresh and waits for per-pod confirmations.

@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"os"
 	"strconv"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -58,9 +57,6 @@ type Sidecar struct {
 	ready         atomic.Bool        // true once app info is fetched and registered
 	connectCancel context.CancelFunc // cancels heartbeat/pubsub goroutines on reconnect
 	reconnectCh   chan struct{}      // heartbeat signals here when it detects sustained failure
-
-	refreshMu     sync.Mutex // guards lastRefreshID
-	lastRefreshID string     // highest refresh-log entry this pod has processed
 }
 
 func NewSidecar(cfg Config) *Sidecar {
@@ -138,6 +134,8 @@ func (s *Sidecar) tryConnect(ctx context.Context) error {
 		}
 	})()
 	go s.safeGo("pubsub", func() { s.SubscribePubSub(connectCtx) })()
+	// separate goroutine: a slow or retrying refresh must not stall pod-get
+	go s.safeGo("refreshlog", func() { s.ConsumeRefreshLog(connectCtx) })()
 	return nil
 }
 

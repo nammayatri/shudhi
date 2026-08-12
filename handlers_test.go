@@ -74,51 +74,6 @@ func TestMatchKeysByInfix(t *testing.T) {
 	}
 }
 
-func TestStreamIDLess(t *testing.T) {
-	cases := []struct {
-		a, b string
-		want bool
-	}{
-		{"1-0", "2-0", true},
-		{"2-0", "1-0", false},
-		{"9-0", "10-0", true},  // plain string compare gets this backwards
-		{"10-0", "9-0", false}, // ...and this
-		{"5-1", "5-2", true},   // same millis, sequence decides
-		{"5-2", "5-1", false},
-		{"5-0", "5-0", false}, // equal is not less
-		{"0-0", "1700000000000-0", true},
-	}
-
-	for _, tc := range cases {
-		if got := streamIDLess(tc.a, tc.b); got != tc.want {
-			t.Errorf("streamIDLess(%q, %q) = %v, want %v", tc.a, tc.b, got, tc.want)
-		}
-	}
-}
-
-func TestSetLastRefreshIDOnlyMovesForward(t *testing.T) {
-	s := &Sidecar{}
-
-	s.setLastRefreshID("10-0")
-	if got := s.getLastRefreshID(); got != "10-0" {
-		t.Fatalf("got %q, want 10-0", got)
-	}
-	// a stale or duplicate delivery must not rewind the cursor
-	s.setLastRefreshID("9-0")
-	if got := s.getLastRefreshID(); got != "10-0" {
-		t.Errorf("cursor rewound to %q, want it to stay at 10-0", got)
-	}
-	// an empty ID (refresh published while the log append failed) is ignored
-	s.setLastRefreshID("")
-	if got := s.getLastRefreshID(); got != "10-0" {
-		t.Errorf("empty ID clobbered cursor: got %q, want 10-0", got)
-	}
-	s.setLastRefreshID("11-0")
-	if got := s.getLastRefreshID(); got != "11-0" {
-		t.Errorf("got %q, want 11-0", got)
-	}
-}
-
 // health must stay reachable without a token so k8s probes keep working.
 func TestHealthNeedsNoToken(t *testing.T) {
 	s := &Sidecar{Config: Config{InMemToken: "s3cret"}}
