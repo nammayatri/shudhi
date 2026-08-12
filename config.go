@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -57,6 +58,9 @@ type Sidecar struct {
 	ready         atomic.Bool        // true once app info is fetched and registered
 	connectCancel context.CancelFunc // cancels heartbeat/pubsub goroutines on reconnect
 	reconnectCh   chan struct{}      // heartbeat signals here when it detects sustained failure
+
+	refreshMu     sync.Mutex // guards lastRefreshID
+	lastRefreshID string     // highest refresh-log entry this pod has processed
 }
 
 func NewSidecar(cfg Config) *Sidecar {
@@ -123,6 +127,7 @@ func (s *Sidecar) tryConnect(ctx context.Context) error {
 	s.reconnectCh = make(chan struct{}, 1)
 
 	s.ready.Store(true)
+	// safeGo returns the wrapped func — it must be invoked, not just evaluated.
 	go s.safeGo("heartbeat", func() {
 		if err := s.Heartbeat(connectCtx); err != nil {
 			log.Printf("heartbeat exited: %v", err)
@@ -131,8 +136,8 @@ func (s *Sidecar) tryConnect(ctx context.Context) error {
 			default:
 			}
 		}
-	})
-	go s.safeGo("pubsub", func() { s.SubscribePubSub(connectCtx) })
+	})()
+	go s.safeGo("pubsub", func() { s.SubscribePubSub(connectCtx) })()
 	return nil
 }
 

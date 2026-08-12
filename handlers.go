@@ -15,6 +15,9 @@ import (
 
 const maxBroadcastRetries = 3
 
+// how long a pod's registered-key hash survives without being touched
+const keysRegistryTTL = 3 * 24 * time.Hour
+
 func (s *Sidecar) Routes() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/registerKey", s.requireToken(s.handleRegisterKey))
@@ -88,7 +91,7 @@ func (s *Sidecar) handleRegisterKey(w http.ResponseWriter, r *http.Request) {
 	key := s.keysKey()
 	pipe := s.Redis.Pipeline()
 	pipe.HSet(ctx, key, req.KeyName, string(val))
-	pipe.Expire(ctx, key, 3*24*time.Hour)
+	pipe.Expire(ctx, key, keysRegistryTTL)
 	if _, err := pipe.Exec(ctx); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -389,7 +392,7 @@ func (s *Sidecar) proxyGetToApp(ctx context.Context, w http.ResponseWriter, key 
 
 type RefreshReq struct {
 	ServiceName string  `json:"serviceName"`
-	KeyInfix   *string `json:"keyInfix"`
+	KeyInfix    *string `json:"keyInfix"`
 }
 
 type PodAckResult struct {
@@ -415,16 +418,33 @@ func (s *Sidecar) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	// build per-pod results
 	var results []PodAckResult
 
-	// if this sidecar is part of the target service, refresh locally first
+	// if this sidecar is part of the target service, refresh locally first.
+	// registry entries come out before the app is told to clear, and go back
+	// in if the clear doesn't land — a stale listing beats a missing one.
 	if req.ServiceName == s.AppInfo.ServiceName {
+		snap := s.deregisterKeys(ctx, req.KeyInfix)
+
 		resp, err := s.doPost(ctx, s.Config.AppURL+"/internal/inMem/refresh", "application/json",
 			strings.NewReader(string(appPayload)))
 		if err != nil {
 			log.Printf("local refresh failed (will still broadcast): %v", err)
+			s.restoreKeys(ctx, snap)
 			results = append(results, PodAckResult{PodName: s.AppInfo.PodName, Success: false, Error: err.Error()})
 		} else {
+			applied := resp.StatusCode < 300
+			status := resp.StatusCode
 			drainClose(resp)
-			results = append(results, PodAckResult{PodName: s.AppInfo.PodName, Success: true})
+			if applied {
+				results = append(results, PodAckResult{PodName: s.AppInfo.PodName, Success: true})
+			} else {
+				s.restoreKeys(ctx, snap)
+				log.Printf("local refresh returned %d (will still broadcast)", status)
+				results = append(results, PodAckResult{
+					PodName: s.AppInfo.PodName,
+					Success: false,
+					Error:   fmt.Sprintf("app returned %d", status),
+				})
+			}
 		}
 	}
 
@@ -466,6 +486,106 @@ func (s *Sidecar) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		"confirmed": confirmed,
 		"pods":      results,
 	})
+}
+
+// keysSnapshot holds registry entries pulled ahead of a refresh, so they can go
+// back if the refresh never lands. Zero value means nothing was removed.
+type keysSnapshot struct {
+	fields map[string]string
+	ttl    time.Duration
+}
+
+// deregisterKeys removes cleared keys from this pod's registry hash, so the
+// dashboard stops listing keys that are no longer cached. Matching mirrors the
+// /api/keys pattern filter: case-insensitive substring. A nil or empty infix
+// means "everything is being cleared", so every field goes.
+//
+// Called *before* the app is asked to clear; the returned snapshot goes back
+// via restoreKeys if that clear fails. Only ever touches this sidecar's own
+// hash — peer pods do the same for themselves when they apply the broadcast.
+func (s *Sidecar) deregisterKeys(ctx context.Context, keyInfix *string) keysSnapshot {
+	hashKey := s.keysKey()
+
+	entries, err := s.Redis.HGetAll(ctx, hashKey).Result()
+	if err != nil {
+		log.Printf("deregister keys: reading %s failed: %v", hashKey, err)
+		return keysSnapshot{}
+	}
+	if len(entries) == 0 {
+		return keysSnapshot{}
+	}
+
+	all := make([]string, 0, len(entries))
+	for name := range entries {
+		all = append(all, name)
+	}
+	names := all
+	if keyInfix != nil && *keyInfix != "" {
+		names = matchKeysByInfix(all, *keyInfix)
+	}
+	if len(names) == 0 {
+		return keysSnapshot{}
+	}
+
+	// keep the remaining TTL so a restore doesn't silently extend the entry's life
+	ttl, err := s.Redis.TTL(ctx, hashKey).Result()
+	if err != nil || ttl <= 0 {
+		ttl = keysRegistryTTL
+	}
+
+	snap := keysSnapshot{fields: make(map[string]string, len(names)), ttl: ttl}
+	for _, name := range names {
+		snap.fields[name] = entries[name]
+	}
+
+	// HDel drops the hash itself once the last field goes, so no separate Del
+	if err := s.Redis.HDel(ctx, hashKey, names...).Err(); err != nil {
+		log.Printf("deregister %d keys from %s failed: %v", len(names), hashKey, err)
+		return keysSnapshot{} // nothing came out, so there's nothing to put back
+	}
+	return snap
+}
+
+// restoreKeys puts a snapshot back after a refresh that didn't land. It detaches
+// from the caller's context so a cancelled request can't skip the compensating
+// write and leave the registry missing keys that are still cached.
+func (s *Sidecar) restoreKeys(ctx context.Context, snap keysSnapshot) {
+	if len(snap.fields) == 0 {
+		return
+	}
+	hashKey := s.keysKey()
+
+	vals := make([]any, 0, len(snap.fields)*2)
+	for name, meta := range snap.fields {
+		vals = append(vals, name, meta)
+	}
+	ttl := snap.ttl
+	if ttl <= 0 {
+		ttl = keysRegistryTTL
+	}
+
+	restoreCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+
+	pipe := s.Redis.Pipeline()
+	pipe.HSet(restoreCtx, hashKey, vals...)
+	pipe.Expire(restoreCtx, hashKey, ttl)
+	if _, err := pipe.Exec(restoreCtx); err != nil {
+		log.Printf("restoring %d keys to %s failed: %v", len(snap.fields), hashKey, err)
+		return
+	}
+	log.Printf("refresh failed — restored %d keys to %s", len(snap.fields), hashKey)
+}
+
+func matchKeysByInfix(names []string, keyInfix string) []string {
+	infix := strings.ToLower(keyInfix)
+	var matched []string
+	for _, name := range names {
+		if strings.Contains(strings.ToLower(name), infix) {
+			matched = append(matched, name)
+		}
+	}
+	return matched
 }
 
 // --- health ---
