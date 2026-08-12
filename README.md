@@ -90,21 +90,36 @@ POST http://localhost:8900/api/registerKey
 
 This makes the key show up in the dashboard so you can browse and inspect it. Without this, get/refresh still work — you just won't see the key listed.
 
-> If `INMEM_TOKEN` is set, the sidecar sends it as `x-inmem-token` header on all calls to your app. Use it to verify requests come from a trusted sidecar.
+> If `INMEM_TOKEN` is set, the sidecar sends it as `x-inmem-token` header on all calls to your app. Use it to verify requests come from a trusted sidecar. Your app must send the same header back on `/api/registerKey` — see Authentication below.
 
 ## Sidecar API
 
 All endpoints work from any sidecar — the dashboard only needs to reach one to interact with any service's in-memory cache.
 
-| Method | Endpoint | What it does |
-|--------|----------|-------------|
-| `GET` | `/api/services` | List all services with registered caches |
-| `GET` | `/api/pods?service=X` | List live pods for a service |
-| `GET` | `/api/keys?service=X&pod=Y` | List cached keys (pod optional) |
-| `POST` | `/api/pod/get` | Read a cached value from a specific pod's memory |
-| `POST` | `/api/refresh` | Clear cache entries across all pods of a service |
-| `POST` | `/api/registerKey` | Register a cache key (called by your app) |
-| `GET` | `/api/health` | Health check |
+| Method | Endpoint | What it does | Token |
+|--------|----------|-------------|-------|
+| `GET` | `/api/services` | List all services with registered caches | required |
+| `GET` | `/api/pods?service=X` | List live pods for a service | required |
+| `GET` | `/api/keys?service=X&pod=Y` | List cached keys (pod optional) | required |
+| `POST` | `/api/pod/get` | Read a cached value from a specific pod's memory | required |
+| `POST` | `/api/refresh` | Clear cache entries across all pods of a service | required |
+| `POST` | `/api/registerKey` | Register a cache key (called by your app) | required |
+| `GET` | `/api/health` | Health check | open |
+
+## Authentication
+
+`INMEM_TOKEN` is a single shared secret used in both directions:
+
+- **Outbound** — the sidecar sends `x-inmem-token` on every call it makes to your app and to peer sidecars.
+- **Inbound** — every `/api/*` endpoint except `/api/health` requires the same header. A missing or wrong token gets `401`. Comparison is constant-time.
+
+`/api/health` stays open so k8s liveness/readiness probes work without credentials.
+
+**If `INMEM_TOKEN` is unset, inbound validation is skipped entirely** and every endpoint is open — including reading cached values out of any pod and clearing caches fleet-wide. The sidecar logs a warning at startup when this is the case. Set a token in any shared environment.
+
+> **Upgrading:** if you already run with `INMEM_TOKEN` set, your app must now send `x-inmem-token` on its `/api/registerKey` calls — previously the token was outbound-only and registration was unauthenticated. Without it, key registration gets `401` and the dashboard stops listing that pod's keys (get/refresh keep working).
+
+The dashboard's nginx injects the token server-side via its own `INMEM_TOKEN` env var, so the browser never sees it. Note that this leaves the dashboard itself unauthenticated — anyone who can reach it can act through it. Put auth in front of the dashboard if it's exposed beyond your cluster.
 
 ## How It Works
 

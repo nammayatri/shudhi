@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/hmac"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -16,14 +17,33 @@ const maxBroadcastRetries = 3
 
 func (s *Sidecar) Routes() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /api/registerKey", s.handleRegisterKey)
-	mux.HandleFunc("GET /api/services", s.requireReady(s.handleServices))
-	mux.HandleFunc("GET /api/pods", s.requireReady(s.handlePods))
-	mux.HandleFunc("GET /api/keys", s.requireReady(s.handleKeys))
-	mux.HandleFunc("POST /api/pod/get", s.requireReady(s.handlePodGet))
-	mux.HandleFunc("POST /api/refresh", s.requireReady(s.handleRefresh))
+	mux.HandleFunc("POST /api/registerKey", s.requireToken(s.handleRegisterKey))
+	mux.HandleFunc("GET /api/services", s.requireToken(s.requireReady(s.handleServices)))
+	mux.HandleFunc("GET /api/pods", s.requireToken(s.requireReady(s.handlePods)))
+	mux.HandleFunc("GET /api/keys", s.requireToken(s.requireReady(s.handleKeys)))
+	mux.HandleFunc("POST /api/pod/get", s.requireToken(s.requireReady(s.handlePodGet)))
+	mux.HandleFunc("POST /api/refresh", s.requireToken(s.requireReady(s.handleRefresh)))
+	// health stays open — k8s probes have no token
 	mux.HandleFunc("GET /api/health", s.handleHealth)
 	return mux
+}
+
+// requireToken rejects requests that don't carry the shared x-inmem-token.
+// If INMEM_TOKEN is unset the check is skipped, so existing deployments keep
+// working until they set one (main logs a warning in that case).
+func (s *Sidecar) requireToken(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if s.Config.InMemToken != "" {
+			got := r.Header.Get("x-inmem-token")
+			if !hmac.Equal([]byte(got), []byte(s.Config.InMemToken)) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusUnauthorized)
+				json.NewEncoder(w).Encode(map[string]string{"error": "invalid or missing x-inmem-token"})
+				return
+			}
+		}
+		next(w, r)
+	}
 }
 
 func (s *Sidecar) requireReady(next http.HandlerFunc) http.HandlerFunc {

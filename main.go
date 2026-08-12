@@ -10,6 +10,9 @@ import (
 
 func main() {
 	cfg := LoadConfig()
+	if cfg.InMemToken == "" {
+		log.Println("WARNING: INMEM_TOKEN not set — /api endpoints accept unauthenticated requests")
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

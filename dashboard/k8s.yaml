@@ -36,6 +36,12 @@ spec:
         env:
         - name: SIDECAR_UPSTREAM
           value: http://shudhi-sidecar.atlas.svc.cluster.local:8900
+        - name: INMEM_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: shudhi-secrets
+              key: inmem-token
+              optional: true
         resources:
           limits:
             cpu: 100m
